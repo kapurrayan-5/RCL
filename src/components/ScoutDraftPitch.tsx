@@ -9,7 +9,6 @@ interface ScoutDraftPitchProps {
   formation: FormationType;
   startingXI: Record<string, Player | null>;
   onPlacePlayerInSlot: (slotId: string, player: Player) => void;
-  onRemovePlayerFromSlot: (slotId: string) => void;
   analytics: TeamAnalytics;
   onLaunchLiveCup: () => void;
   rerollsRemaining: number;
@@ -20,7 +19,6 @@ export const ScoutDraftPitch: React.FC<ScoutDraftPitchProps> = ({
   formation,
   startingXI,
   onPlacePlayerInSlot,
-  onRemovePlayerFromSlot,
   analytics,
   onLaunchLiveCup,
   rerollsRemaining,
@@ -92,11 +90,13 @@ export const ScoutDraftPitch: React.FC<ScoutDraftPitchProps> = ({
 
   // Handle clicking a slot on the pitch
   const handleSlotClick = (slot: FormationSlot) => {
+    // Permanent lock: Players cannot be removed or overwritten once added to the team
+    if (startingXI[slot.id]) {
+      sound.playKick();
+      return;
+    }
+
     if (!selectedCandidate) {
-      if (startingXI[slot.id]) {
-        onRemovePlayerFromSlot(slot.id);
-        sound.playCardSelect();
-      }
       return;
     }
 
@@ -390,11 +390,13 @@ export const ScoutDraftPitch: React.FC<ScoutDraftPitchProps> = ({
                   key={slot.id}
                   style={{ left: `${slot.x}%`, top: `${slot.y}%` }}
                   onClick={() => handleSlotClick(slot)}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 cursor-pointer z-10 transition-transform duration-200 hover:scale-105"
+                  className={`absolute -translate-x-1/2 -translate-y-1/2 z-10 transition-transform duration-200 ${
+                    placedPlayer ? 'cursor-default' : 'cursor-pointer hover:scale-105'
+                  }`}
                 >
                   {placedPlayer ? (
-                    <div className="relative flex flex-col items-center group">
-                      <div className="w-13 h-13 sm:w-15 sm:h-15 rounded-xl border-2 border-amber-400/80 bg-gradient-to-b from-slate-900 to-black flex flex-col items-center justify-center p-1 shadow-xl">
+                    <div className="relative flex flex-col items-center">
+                      <div className="w-13 h-13 sm:w-15 sm:h-15 rounded-xl border-2 border-amber-400/80 bg-gradient-to-b from-slate-900 to-black flex flex-col items-center justify-center p-1 shadow-xl relative overflow-hidden">
                         <span className="font-athletic font-black text-xs text-amber-400 tabular-nums">
                           {placedPlayer.overall}
                         </span>
@@ -406,17 +408,13 @@ export const ScoutDraftPitch: React.FC<ScoutDraftPitchProps> = ({
                         </span>
                       </div>
 
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRemovePlayerFromSlot(slot.id);
-                          sound.playCardSelect();
-                        }}
-                        className="opacity-0 group-hover:opacity-100 absolute -top-1.5 -right-1.5 w-4 h-4 bg-rose-600 text-white rounded-full flex items-center justify-center shadow transition-opacity"
-                        title="Remove player"
+                      {/* Permanent Lock Indicator */}
+                      <div
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-amber-500/20 border border-amber-400/70 text-amber-400 rounded-full flex items-center justify-center shadow backdrop-blur-xs"
+                        title="Player is locked into the starting XI"
                       >
-                        <X className="w-2.5 h-2.5" />
-                      </button>
+                        <Lock className="w-2.5 h-2.5" />
+                      </div>
                     </div>
                   ) : (
                     <div

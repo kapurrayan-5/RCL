@@ -36,7 +36,6 @@ import { PreMatchSetup } from './components/PreMatchSetup';
 import { ScoutDraftPitch } from './components/ScoutDraftPitch';
 import { LiveCupView } from './components/LiveCupView';
 import { PostRunSummary } from './components/PostRunSummary';
-import { DraftView } from './components/DraftView';
 import { CareerModal } from './components/CareerModal';
 import { SettingsModal } from './components/SettingsModal';
 
@@ -145,11 +144,6 @@ export default function App() {
       next[slotId] = player;
       return next;
     });
-  };
-
-  // Remove player from slot
-  const handleRemovePlayer = (slotId: string) => {
-    setStartingXI(prev => ({ ...prev, [slotId]: null }));
   };
 
   // Build user MatchTeamInfo
@@ -320,7 +314,6 @@ export default function App() {
             formation={formation}
             startingXI={startingXI}
             onPlacePlayerInSlot={handlePlacePlayer}
-            onRemovePlayerFromSlot={handleRemovePlayer}
             analytics={analytics}
             onLaunchLiveCup={handleLaunchLiveCup}
             rerollsRemaining={rerollsRemaining}
@@ -358,27 +351,6 @@ export default function App() {
             summary={campaignSummary}
             totalTrophiesSecured={career.trophiesWon}
             onPlayAgain={handlePlayAgain}
-          />
-        )}
-
-        {/* Auxiliary Roster & Inspection Tab */}
-        {activeTab === 'PICK' && (
-          <DraftView
-            availablePlayers={availablePlayers}
-            selectedPlayerIdsInXI={selectedPlayerIdsInXI}
-            onDraftPlayerToSquad={(player) => {
-              // Try to find open slot
-              const config = FORMATIONS[formation];
-              const openSlot = config.slots.find(s => startingXI[s.id] === null);
-              if (openSlot) {
-                handlePlacePlayer(openSlot.id, player);
-                setActiveTab('SCOUT');
-              } else {
-                setActiveTab('SCOUT');
-              }
-            }}
-            onGoToPlace={() => setActiveTab('SCOUT')}
-            guidedEnabled={settings.guidedEnabled}
           />
         )}
       </main>

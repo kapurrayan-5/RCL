@@ -1,7 +1,7 @@
 import React from 'react';
-import { Volume2, VolumeX, HelpCircle, Trophy, Settings as SettingsIcon, Shield, Sliders } from 'lucide-react';
+import { Volume2, VolumeX, HelpCircle, Trophy, Settings as SettingsIcon } from 'lucide-react';
 
-export type ActiveTab = 'SETUP' | 'SCOUT' | 'PICK' | 'PLACE' | 'PLAY' | 'SUMMARY';
+export type ActiveTab = 'SETUP' | 'SCOUT' | 'PLAY' | 'SUMMARY';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -48,12 +48,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Zone 2: Navigation Links (Four Core Steps) */}
+        {/* Zone 2: Navigation Links (Core Steps) */}
         <nav className="flex items-center gap-1 sm:gap-2">
           {/* Step 1: SETUP */}
           <button
             onClick={() => onSelectTab('SETUP')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
               activeTab === 'SETUP'
                 ? 'bg-red-600 text-white shadow-[0_0_12px_rgba(220,38,38,0.5)]'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -65,7 +65,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Step 2: SCOUT & DRAFT */}
           <button
             onClick={() => onSelectTab('SCOUT')}
-            className={`relative px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`relative px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
               activeTab === 'SCOUT'
                 ? 'bg-red-600 text-white shadow-[0_0_12px_rgba(220,38,38,0.5)]'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -82,7 +82,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Step 3: LIVE CUP */}
           <button
             onClick={() => onSelectTab('PLAY')}
-            className={`relative px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`relative px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
               activeTab === 'PLAY'
                 ? 'bg-emerald-600 text-white shadow-[0_0_12px_rgba(16,185,129,0.5)]'
                 : validLineupCount === 11
@@ -97,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {hasCompletedCampaign && (
             <button
               onClick={() => onSelectTab('SUMMARY')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
                 activeTab === 'SUMMARY'
                   ? 'bg-amber-600 text-white shadow-[0_0_12px_rgba(245,158,11,0.5)]'
                   : 'text-amber-400 hover:text-white hover:bg-amber-950/40'
@@ -106,16 +106,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               4. SUMMARY
             </button>
           )}
-
-          {/* Quick Roster Inspection Tab */}
-          <button
-            onClick={() => onSelectTab('PICK')}
-            className={`hidden md:inline-block px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-400 hover:text-slate-200 transition-colors ${
-              activeTab === 'PICK' ? 'text-white bg-slate-800' : ''
-            }`}
-          >
-            ROSTER
-          </button>
         </nav>
 
         {/* Zone 3: Manager Profile & Controls */}
@@ -145,7 +135,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Manager Career / Profile */}
           <button
             onClick={onOpenCareer}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors border border-slate-700"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors border border-slate-700 cursor-pointer"
           >
             <Trophy className="w-3.5 h-3.5 text-amber-400" />
             <span className="hidden md:inline">CAREER</span>
@@ -154,7 +144,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Settings */}
           <button
             onClick={onOpenSettings}
-            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
             <SettingsIcon className="w-4 h-4" />
           </button>
