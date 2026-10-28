@@ -1,0 +1,6 @@
+{
+  "name": "RCL - Football Club Draft & Tournament Simulation",
+  "description": "Scout legendary club squads from 2000 to 2026, draft iconic footballers, build your tactical dream XI, and conquer the RCL Cup.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
