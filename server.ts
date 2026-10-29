@@ -12,7 +12,20 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// Enable CORS for all incoming requests & preflight OPTIONS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -127,200 +140,60 @@ app.post('/api/leaderboard/submit', (req, res) => {
   res.json({ success: true });
 });
 
-// Create Room
-app.post('/api/rooms/create', (req, res) => {
-  const { hostName, clubName, mode, customCode } = req.body;
-  const code = (customCode && customCode.trim() ? customCode.trim().toUpperCase() : `RCL-${Math.floor(100 + Math.random() * 900)}`).replace(/[^A-Z0-9-]/g, '').slice(0, 10);
+// Helper to execute bot turn if active drafter is an AI bot
+function performBotTurn(room: MultiplayerRoom) {
+  if (room.status !== 'DRAFT') return;
+  const activeMember = room.members.find(m => m.id === room.currentTurnMemberId);
+  if (!activeMember || !activeMember.isBot) return;
 
-  const initialClub = getRandomClub();
-  const hostId = `usr-${Math.random().toString(36).substring(2, 9)}`;
+  const currentClub = ALL_CLUBS.find(c => c.id === room.activeSquadId) || ALL_CLUBS[0];
+  const emptySlots = Object.entries(activeMember.startingXI).filter(([, p]) => p === null);
+  if (emptySlots.length === 0) return;
 
-  const hostMember: RoomMember = {
-    id: hostId,
-    name: hostName || 'Host Manager',
-    clubName: clubName || 'Host XI',
-    avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces',
-    isHost: true,
-    ready: false,
-    formation: '4-3-3',
-    tactics: {
-      buildup: 'Direct',
-      mentality: 'Balanced',
-      defensiveLine: 'Medium',
-      pressing: 'Medium',
-      passing: 'Mixed',
-      width: 'Balanced',
-    },
-    startingXI: {},
-    analytics: {
-      overallRating: 0,
-      scoringRating: 0,
-      stoppingRating: 0,
-      teamworkRating: 0,
-      formationCompatibility: 80,
-      cardScore: 0,
-      positionCoverage: 0,
-      squadDepth: 0,
-    },
-    rerollsLeft: 3,
-    draftPicksCount: 0,
-    matchScore: 0,
-  };
+  // Find unclaimed player that fits any empty slot
+  let pickedPlayer: Player | null = null;
+  let targetSlotId: string | null = null;
 
-  FORMATIONS['4-3-3'].slots.forEach(s => {
-    hostMember.startingXI[s.id] = null;
-  });
+  for (const [slotId] of emptySlots) {
+    const slotConfig = FORMATIONS[activeMember.formation]?.slots.find(s => s.id === slotId);
+    if (!slotConfig) continue;
 
-  const room: MultiplayerRoom = {
-    code,
-    name: `${hostMember.name}'s Room`,
-    mode: (mode as MultiplayerMode) || '1v1',
-    status: 'LOBBY',
-    hostId,
-    members: [hostMember],
-    currentTurnMemberId: hostId,
-    turnIndex: 0,
-    claimedPlayerIds: [],
-    activeSquadId: initialClub.id,
-    h2hMatch: null,
-    bracket: null,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
+    const candidate = currentClub.roster.find(p => {
+      if (room.claimedPlayerIds.includes(p.id)) return false;
+      const comp = FORMATIONS[activeMember.formation] ? (p.primaryPosition === slotConfig.position || p.secondaryPositions.includes(slotConfig.position)) : true;
+      return comp;
+    });
 
-  rooms.set(code, room);
-  res.json({ room, currentMemberId: hostId });
-});
-
-// Join Room
-app.post('/api/rooms/join', (req, res) => {
-  const { code, memberName, clubName } = req.body;
-  const roomCode = (code || '').trim().toUpperCase();
-  const room = rooms.get(roomCode);
-
-  if (!room) {
-    return res.status(404).json({ error: 'Room not found. Check code and try again.' });
+    if (candidate) {
+      pickedPlayer = candidate;
+      targetSlotId = slotId;
+      break;
+    }
   }
 
-  const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
-  if (room.members.length >= maxCapacity) {
-    return res.status(400).json({ error: 'Room is already full.' });
+  // Fallback to highest rated unclaimed player if strict position match not found
+  if (!pickedPlayer) {
+    const fallbackCandidate = currentClub.roster.find(p => !room.claimedPlayerIds.includes(p.id));
+    if (fallbackCandidate && emptySlots.length > 0) {
+      pickedPlayer = fallbackCandidate;
+      targetSlotId = emptySlots[0][0];
+    }
   }
 
-  if (room.status !== 'LOBBY') {
-    return res.status(400).json({ error: 'Match/Draft has already started in this room.' });
+  if (pickedPlayer && targetSlotId) {
+    activeMember.startingXI[targetSlotId] = pickedPlayer;
+    activeMember.draftPicksCount = Object.values(activeMember.startingXI).filter(Boolean).length;
+    room.claimedPlayerIds.push(pickedPlayer.id);
+    activeMember.analytics.overallRating = calculateTeamOverall(activeMember.startingXI);
   }
 
-  const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
-  const newMember: RoomMember = {
-    id: memberId,
-    name: memberName || `Manager ${room.members.length + 1}`,
-    clubName: clubName || `Challenger XI`,
-    avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
-    isHost: false,
-    ready: false,
-    formation: '4-3-3',
-    tactics: {
-      buildup: 'Direct',
-      mentality: 'Balanced',
-      defensiveLine: 'Medium',
-      pressing: 'Medium',
-      passing: 'Mixed',
-      width: 'Balanced',
-    },
-    startingXI: {},
-    analytics: {
-      overallRating: 0,
-      scoringRating: 0,
-      stoppingRating: 0,
-      teamworkRating: 0,
-      formationCompatibility: 80,
-      cardScore: 0,
-      positionCoverage: 0,
-      squadDepth: 0,
-    },
-    rerollsLeft: 3,
-    draftPicksCount: 0,
-    matchScore: 0,
-  };
-
-  FORMATIONS['4-3-3'].slots.forEach(s => {
-    newMember.startingXI[s.id] = null;
-  });
-
-  room.members.push(newMember);
-  room.updatedAt = Date.now();
-
-  broadcastToRoom(roomCode, { type: 'ROOM_UPDATE', room });
-  res.json({ room, currentMemberId: memberId });
-});
-
-// Get Room State
-app.get('/api/rooms/:code', (req, res) => {
-  const room = rooms.get(req.params.code.toUpperCase());
-  if (!room) {
-    return res.status(404).json({ error: 'Room not found' });
-  }
-  res.json({ room });
-});
-
-// Start Draft in Room
-app.post('/api/rooms/start-draft', (req, res) => {
-  const { code, memberId } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  if (room.hostId !== memberId) return res.status(403).json({ error: 'Only host can start draft' });
-
-  room.status = 'DRAFT';
-  room.currentTurnMemberId = room.members[0].id;
-  room.turnIndex = 0;
-  room.claimedPlayerIds = [];
-  room.activeSquadId = getRandomClub().id;
-  room.updatedAt = Date.now();
-
-  broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
-});
-
-// Room Draft Pick (Turn-based + Exclusive Claiming)
-app.post('/api/rooms/draft-pick', (req, res) => {
-  const { code, memberId, playerId, slotId } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-
-  if (room.status !== 'DRAFT') {
-    return res.status(400).json({ error: 'Room is not drafting' });
-  }
-
-  // Exclusive player pool check: No duplicates allowed across managers!
-  if (room.claimedPlayerIds.includes(playerId)) {
-    return res.status(400).json({ error: 'Player has already been drafted by another manager!' });
-  }
-
-  const member = room.members.find(m => m.id === memberId);
-  if (!member) return res.status(404).json({ error: 'Member not found' });
-
-  // Locate player from active squad or full catalog
-  const club = ALL_CLUBS.find(c => c.id === room.activeSquadId) || ALL_CLUBS[0];
-  const player = club.roster.find(p => p.id === playerId) || ALL_CLUBS.flatMap(c => c.roster).find(p => p.id === playerId);
-  if (!player) return res.status(404).json({ error: 'Player not found' });
-
-  // Lock player into member's starting XI
-  member.startingXI[slotId] = player;
-  member.draftPicksCount = Object.values(member.startingXI).filter(Boolean).length;
-  room.claimedPlayerIds.push(player.id);
-
-  // Update member analytics overview
-  const teamOvr = calculateTeamOverall(member.startingXI);
-  member.analytics.overallRating = teamOvr;
-
-  // Next Turn / Roll Squad
-  const memberIndex = room.members.findIndex(m => m.id === memberId);
+  // Advance turn to next member
+  const memberIndex = room.members.findIndex(m => m.id === activeMember.id);
   const nextMemberIndex = (memberIndex + 1) % room.members.length;
   room.currentTurnMemberId = room.members[nextMemberIndex].id;
   room.turnIndex += 1;
 
-  // Automatically roll next squad
+  // Roll next squad
   const nextSquad = getRandomClub([room.activeSquadId]);
   room.activeSquadId = nextSquad.id;
 
@@ -332,29 +205,357 @@ app.post('/api/rooms/draft-pick', (req, res) => {
 
   room.updatedAt = Date.now();
   broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
+}
+
+// Create Room
+app.post('/api/rooms/create', (req, res) => {
+  try {
+    const { hostName, clubName, mode, customCode } = req.body || {};
+    let code = (customCode && customCode.trim() ? customCode.trim().toUpperCase() : `RCL-${Math.floor(100 + Math.random() * 900)}`).replace(/[^A-Z0-9-]/g, '').slice(0, 10);
+    if (!code) code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
+
+    // Ensure uniqueness
+    let attempts = 0;
+    while (rooms.has(code) && attempts < 10) {
+      code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
+      attempts++;
+    }
+
+    const initialClub = getRandomClub();
+    const hostId = `usr-${Math.random().toString(36).substring(2, 9)}`;
+
+    const hostMember: RoomMember = {
+      id: hostId,
+      name: (hostName && hostName.trim()) ? hostName.trim() : 'Host Manager',
+      clubName: (clubName && clubName.trim()) ? clubName.trim() : 'RCL Dream XI',
+      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces',
+      isHost: true,
+      ready: false,
+      formation: '4-3-3',
+      tactics: {
+        buildup: 'Direct',
+        mentality: 'Balanced',
+        defensiveLine: 'Medium',
+        pressing: 'Medium',
+        passing: 'Mixed',
+        width: 'Balanced',
+      },
+      startingXI: {},
+      analytics: {
+        overallRating: 0,
+        scoringRating: 0,
+        stoppingRating: 0,
+        teamworkRating: 0,
+        formationCompatibility: 80,
+        cardScore: 0,
+        positionCoverage: 0,
+        squadDepth: 0,
+      },
+      rerollsLeft: 3,
+      draftPicksCount: 0,
+      matchScore: 0,
+    };
+
+    FORMATIONS['4-3-3'].slots.forEach(s => {
+      hostMember.startingXI[s.id] = null;
+    });
+
+    const room: MultiplayerRoom = {
+      code,
+      name: `${hostMember.name}'s Room`,
+      mode: (mode as MultiplayerMode) || '1v1',
+      status: 'LOBBY',
+      hostId,
+      members: [hostMember],
+      currentTurnMemberId: hostId,
+      turnIndex: 0,
+      claimedPlayerIds: [],
+      activeSquadId: initialClub.id,
+      h2hMatch: null,
+      bracket: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    rooms.set(code, room);
+    console.log(`[RCL Server] Created room ${code} for ${hostMember.name}`);
+    res.json({ room, currentMemberId: hostId });
+  } catch (err: any) {
+    console.error('[RCL Server] Error creating room:', err);
+    res.status(500).json({ error: err.message || 'Failed to create room' });
+  }
+});
+
+// Join Room
+app.post('/api/rooms/join', (req, res) => {
+  try {
+    const { code, memberName, clubName } = req.body || {};
+    const roomCode = (code || '').trim().toUpperCase();
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found. Check code and try again.' });
+    }
+
+    const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+    if (room.members.length >= maxCapacity) {
+      return res.status(400).json({ error: 'Room is already full.' });
+    }
+
+    if (room.status !== 'LOBBY') {
+      return res.status(400).json({ error: 'Match/Draft has already started in this room.' });
+    }
+
+    const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
+    const newMember: RoomMember = {
+      id: memberId,
+      name: (memberName && memberName.trim()) ? memberName.trim() : `Manager ${room.members.length + 1}`,
+      clubName: (clubName && clubName.trim()) ? clubName.trim() : `Challenger XI`,
+      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
+      isHost: false,
+      ready: false,
+      formation: '4-3-3',
+      tactics: {
+        buildup: 'Direct',
+        mentality: 'Balanced',
+        defensiveLine: 'Medium',
+        pressing: 'Medium',
+        passing: 'Mixed',
+        width: 'Balanced',
+      },
+      startingXI: {},
+      analytics: {
+        overallRating: 0,
+        scoringRating: 0,
+        stoppingRating: 0,
+        teamworkRating: 0,
+        formationCompatibility: 80,
+        cardScore: 0,
+        positionCoverage: 0,
+        squadDepth: 0,
+      },
+      rerollsLeft: 3,
+      draftPicksCount: 0,
+      matchScore: 0,
+    };
+
+    FORMATIONS['4-3-3'].slots.forEach(s => {
+      newMember.startingXI[s.id] = null;
+    });
+
+    room.members.push(newMember);
+    room.updatedAt = Date.now();
+
+    broadcastToRoom(roomCode, { type: 'ROOM_UPDATE', room });
+    console.log(`[RCL Server] Member ${newMember.name} joined room ${roomCode}`);
+    res.json({ room, currentMemberId: memberId });
+  } catch (err: any) {
+    console.error('[RCL Server] Error joining room:', err);
+    res.status(500).json({ error: err.message || 'Failed to join room' });
+  }
+});
+
+// Add Bot Challenger into room
+app.post('/api/rooms/add-bot', (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const roomCode = (code || '').trim().toUpperCase();
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+    if (room.members.length >= maxCapacity) {
+      return res.status(400).json({ error: 'Room is already full' });
+    }
+
+    const BOT_MANAGERS = [
+      { name: 'Pep Guardiola', club: 'Barça 2011' },
+      { name: 'Sir Alex Ferguson', club: 'Man United 2008' },
+      { name: 'Carlo Ancelotti', club: 'Real Madrid 2017' },
+      { name: 'José Mourinho', club: 'Chelsea 2005' },
+      { name: 'Claudio Ranieri', club: 'Leicester 2016' },
+      { name: 'Jürgen Klopp', club: 'Liverpool 2019' },
+    ];
+    const pickedBot = BOT_MANAGERS[Math.floor(Math.random() * BOT_MANAGERS.length)];
+    const botId = `bot-${Math.random().toString(36).substring(2, 9)}`;
+
+    const botMember: RoomMember = {
+      id: botId,
+      name: `${pickedBot.name} (AI)`,
+      clubName: pickedBot.club,
+      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop&crop=faces',
+      isHost: false,
+      ready: true,
+      formation: '4-3-3',
+      tactics: {
+        buildup: 'Direct',
+        mentality: 'Attacking',
+        defensiveLine: 'High',
+        pressing: 'High',
+        passing: 'Mixed',
+        width: 'Wide',
+      },
+      startingXI: {},
+      analytics: {
+        overallRating: 84,
+        scoringRating: 82,
+        stoppingRating: 80,
+        teamworkRating: 85,
+        formationCompatibility: 85,
+        cardScore: 84,
+        positionCoverage: 80,
+        squadDepth: 75,
+      },
+      rerollsLeft: 3,
+      draftPicksCount: 0,
+      matchScore: 0,
+      isBot: true,
+    };
+
+    FORMATIONS['4-3-3'].slots.forEach(s => {
+      botMember.startingXI[s.id] = null;
+    });
+
+    room.members.push(botMember);
+    room.updatedAt = Date.now();
+
+    broadcastToRoom(roomCode, { type: 'ROOM_UPDATE', room });
+    console.log(`[RCL Server] Bot ${botMember.name} added to room ${roomCode}`);
+    res.json({ room, botMember });
+  } catch (err: any) {
+    console.error('[RCL Server] Error adding bot:', err);
+    res.status(500).json({ error: err.message || 'Failed to add bot challenger' });
+  }
+});
+
+// Get Room State
+app.get('/api/rooms/:code', (req, res) => {
+  try {
+    const room = rooms.get(req.params.code.toUpperCase());
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
+});
+
+// Start Draft in Room
+app.post('/api/rooms/start-draft', (req, res) => {
+  try {
+    const { code, memberId } = req.body || {};
+    const room = rooms.get((code || '').toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.hostId !== memberId) return res.status(403).json({ error: 'Only host can start draft' });
+
+    room.status = 'DRAFT';
+    room.currentTurnMemberId = room.members[0].id;
+    room.turnIndex = 0;
+    room.claimedPlayerIds = [];
+    room.activeSquadId = getRandomClub().id;
+    room.updatedAt = Date.now();
+
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
+});
+
+// Room Draft Pick (Turn-based + Exclusive Claiming)
+app.post('/api/rooms/draft-pick', (req, res) => {
+  try {
+    const { code, memberId, playerId, slotId } = req.body || {};
+    const room = rooms.get((code || '').toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+
+    if (room.status !== 'DRAFT') {
+      return res.status(400).json({ error: 'Room is not drafting' });
+    }
+
+    // Exclusive player pool check: No duplicates allowed across managers!
+    if (room.claimedPlayerIds.includes(playerId)) {
+      return res.status(400).json({ error: 'Player has already been drafted by another manager!' });
+    }
+
+    const member = room.members.find(m => m.id === memberId);
+    if (!member) return res.status(404).json({ error: 'Member not found' });
+
+    // Locate player from active squad or full catalog
+    const club = ALL_CLUBS.find(c => c.id === room.activeSquadId) || ALL_CLUBS[0];
+    const player = club.roster.find(p => p.id === playerId) || ALL_CLUBS.flatMap(c => c.roster).find(p => p.id === playerId);
+    if (!player) return res.status(404).json({ error: 'Player not found' });
+
+    // Lock player into member's starting XI
+    member.startingXI[slotId] = player;
+    member.draftPicksCount = Object.values(member.startingXI).filter(Boolean).length;
+    room.claimedPlayerIds.push(player.id);
+
+    // Update member analytics overview
+    const teamOvr = calculateTeamOverall(member.startingXI);
+    member.analytics.overallRating = teamOvr;
+
+    // Next Turn / Roll Squad
+    const memberIndex = room.members.findIndex(m => m.id === memberId);
+    const nextMemberIndex = (memberIndex + 1) % room.members.length;
+    room.currentTurnMemberId = room.members[nextMemberIndex].id;
+    room.turnIndex += 1;
+
+    // Automatically roll next squad
+    const nextSquad = getRandomClub([room.activeSquadId]);
+    room.activeSquadId = nextSquad.id;
+
+    // Check if all members have filled all 11 slots
+    const allFull = room.members.every(m => Object.values(m.startingXI).filter(Boolean).length >= 11);
+    if (allFull) {
+      room.status = 'READY_BATTLE';
+    }
+
+    room.updatedAt = Date.now();
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+
+    // If next member is a bot and draft is still active, perform bot turn after small tick
+    const nextMember = room.members[nextMemberIndex];
+    if (nextMember && nextMember.isBot && room.status === 'DRAFT') {
+      setTimeout(() => {
+        performBotTurn(room);
+      }, 500);
+    }
+
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
 });
 
 // Manual Reroll for current active drafter
 app.post('/api/rooms/reroll', (req, res) => {
-  const { code, memberId } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
+  try {
+    const { code, memberId } = req.body || {};
+    const room = rooms.get((code || '').toUpperCase());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
 
-  const member = room.members.find(m => m.id === memberId);
-  if (!member) return res.status(404).json({ error: 'Member not found' });
+    const member = room.members.find(m => m.id === memberId);
+    if (!member) return res.status(404).json({ error: 'Member not found' });
 
-  if (member.rerollsLeft <= 0) {
-    return res.status(400).json({ error: 'No rerolls remaining' });
+    if (member.rerollsLeft <= 0) {
+      return res.status(400).json({ error: 'No rerolls remaining' });
+    }
+
+    member.rerollsLeft -= 1;
+    const nextSquad = getRandomClub([room.activeSquadId]);
+    room.activeSquadId = nextSquad.id;
+    room.updatedAt = Date.now();
+
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
   }
-
-  member.rerollsLeft -= 1;
-  const nextSquad = getRandomClub([room.activeSquadId]);
-  room.activeSquadId = nextSquad.id;
-  room.updatedAt = Date.now();
-
-  broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
 });
 
 // Update Member Tactics & Formation
@@ -576,9 +777,15 @@ async function startServer() {
     });
   }
 
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`RCL Full-Stack Server active on port ${PORT}`);
+  let port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const portArgIdx = process.argv.indexOf('--port');
+  if (portArgIdx !== -1 && process.argv[portArgIdx + 1]) {
+    const val = parseInt(process.argv[portArgIdx + 1], 10);
+    if (!isNaN(val)) port = val;
+  }
+
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`RCL Full-Stack Server active on port ${port}`);
   });
 }
 

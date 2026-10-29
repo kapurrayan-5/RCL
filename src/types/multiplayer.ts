@@ -18,6 +18,7 @@ export interface RoomMember {
   rerollsLeft: number;
   draftPicksCount: number;
   matchScore: number;
+  isBot?: boolean;
 }
 
 export interface MatchLiveEvent {
