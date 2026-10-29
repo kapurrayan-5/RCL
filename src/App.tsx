@@ -13,6 +13,7 @@ import {
   TournamentHistoryRecord,
   TournamentState,
 } from './types/game';
+import { MultiplayerRoom } from './types/multiplayer';
 import { ALL_CLUBS, getClubById } from './data/clubs';
 import { calculateTeamAnalytics, FORMATIONS, getPositionalCompatibility } from './utils/formation';
 import { initializeTournament } from './utils/tournament';
@@ -30,6 +31,7 @@ import {
   saveSettings,
   saveTactics,
 } from './utils/storage';
+import { subscribeToRoomSocket } from './services/multiplayerApi';
 
 import { ActiveTab, Navbar } from './components/Navbar';
 import { PreMatchSetup } from './components/PreMatchSetup';
@@ -38,9 +40,14 @@ import { LiveCupView } from './components/LiveCupView';
 import { PostRunSummary } from './components/PostRunSummary';
 import { CareerModal } from './components/CareerModal';
 import { SettingsModal } from './components/SettingsModal';
+import { MultiplayerLobbyModal } from './components/MultiplayerLobbyModal';
+import { MultiplayerDraftView } from './components/MultiplayerDraftView';
+import { H2HComparisonView } from './components/H2HComparisonView';
+import { H2HMatchView } from './components/H2HMatchView';
+import { LeaderboardModal } from './components/LeaderboardModal';
 
 export default function App() {
-  // Navigation: Step 1 (SETUP), Step 2 (SCOUT), Step 3 (PLAY), Step 4 (SUMMARY), or PICK (ROSTER)
+  // Navigation: Step 1 (SETUP), Step 2 (SCOUT), Step 3 (PLAY), Step 4 (SUMMARY), or MP modes
   const [activeTab, setActiveTab] = useState<ActiveTab>('SETUP');
 
   // Storage states
@@ -73,11 +80,47 @@ export default function App() {
   // Modals
   const [isCareerOpen, setIsCareerOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isMultiplayerOpen, setIsMultiplayerOpen] = useState<boolean>(false);
+  const [isLeaderboardOpen, setIsLeaderboardOpen] = useState<boolean>(false);
+
+  // Multiplayer State
+  const [multiplayerRoom, setMultiplayerRoom] = useState<MultiplayerRoom | null>(null);
+  const [currentMemberId, setCurrentMemberId] = useState<string | null>(null);
+
+  // Check URL for invite code on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      setIsMultiplayerOpen(true);
+    }
+  }, []);
 
   // Sync sound setting
   useEffect(() => {
     sound.setMuted(!settings.soundEnabled);
   }, [settings.soundEnabled]);
+
+  // Subscribe to real-time room updates via WebSocket
+  useEffect(() => {
+    if (!multiplayerRoom || !currentMemberId) return;
+
+    const cleanup = subscribeToRoomSocket(multiplayerRoom.code, currentMemberId, (updatedRoom) => {
+      setMultiplayerRoom(updatedRoom);
+
+      // Auto-transition UI when room progresses
+      if (updatedRoom.status === 'DRAFT' && activeTab !== 'MP_DRAFT') {
+        setActiveTab('MP_DRAFT');
+        setIsMultiplayerOpen(false);
+      } else if (updatedRoom.status === 'READY_BATTLE' && activeTab !== 'MP_COMPARE') {
+        setActiveTab('MP_COMPARE');
+      } else if ((updatedRoom.status === 'MATCH' || updatedRoom.status === 'COMPLETED') && activeTab !== 'MP_MATCH') {
+        setActiveTab('MP_MATCH');
+      }
+    });
+
+    return cleanup;
+  }, [multiplayerRoom?.code, currentMemberId, activeTab]);
 
   // Derived scouted clubs
   const scoutedClubs = useMemo(() => {
@@ -158,120 +201,50 @@ export default function App() {
       name: career.clubName || 'RCL Dream XI',
       shortName: 'RCL',
       primaryColor: '#dc2626',
-      secondaryColor: '#ffffff',
-      rating: analytics.overallRating,
+      secondaryColor: '#f59e0b',
+      rating: analytics.overallRating || 82,
       lineup,
       tactics,
       isUser: true,
     };
   };
 
-  // Launch Live Cup (Step 3)
+  // Launch Solo Live Cup
   const handleLaunchLiveCup = () => {
     const userTeam = buildUserMatchTeam();
-    const newTourney = initializeTournament(userTeam, 'standard_32');
-    setTournament(newTourney);
+    const newTournament = initializeTournament(userTeam, 'standard_32');
+    setTournament(newTournament);
     setActiveTab('PLAY');
-    sound.playWhistle();
+    sound.playGoalCelebration();
   };
 
-  // Conclude campaign (Step 4)
-  const handleCampaignComplete = (
-    finish: TournamentHistoryRecord['finish'],
-    groups: any[],
-    knockoutMatches: KnockoutMatch[]
-  ) => {
-    const userTeamId = 'user-team';
-
-    let matchesPlayed = 0;
-    let wins = 0;
-    let draws = 0;
-    let losses = 0;
-    let goalsScored = 0;
-    let goalsConceded = 0;
-    let cleanSheets = 0;
-
-    const userGroup = groups.find(g => g.teams.some((t: any) => t.team.id === userTeamId));
-    if (userGroup) {
-      userGroup.fixtures.forEach((f: any) => {
-        if (f.played && f.result && (f.homeTeamId === userTeamId || f.awayTeamId === userTeamId)) {
-          matchesPlayed++;
-          const isHome = f.homeTeamId === userTeamId;
-          const gf = isHome ? f.result.homeScore : f.result.awayScore;
-          const ga = isHome ? f.result.awayScore : f.result.homeScore;
-          goalsScored += gf;
-          goalsConceded += ga;
-          if (ga === 0) cleanSheets++;
-          if (gf > ga) wins++;
-          else if (gf === ga) draws++;
-          else losses++;
-        }
-      });
-    }
-
-    knockoutMatches.forEach(m => {
-      if (m.played && m.result && (m.homeTeam?.id === userTeamId || m.awayTeam?.id === userTeamId)) {
-        matchesPlayed++;
-        const isHome = m.homeTeam?.id === userTeamId;
-        const gf = isHome ? m.result.homeScore : m.result.awayScore;
-        const ga = isHome ? m.result.awayScore : m.result.homeScore;
-        goalsScored += gf;
-        goalsConceded += ga;
-        if (ga === 0) cleanSheets++;
-        if (m.result.winnerId === userTeamId) wins++;
-        else losses++;
-      }
-    });
-
-    const lineup = Object.values(startingXI).filter((p): p is Player => p !== null);
-    const topPlayer = lineup.sort((a, b) => b.overall - a.overall)[0] || { name: 'Romário', overall: 94 };
-
-    const record: TournamentHistoryRecord = {
-      id: `camp-${Date.now()}`,
-      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      format: 'RCL Cup (32 Teams)',
-      squadName: career.clubName,
-      finish,
-      matchesPlayed: Math.max(1, matchesPlayed),
-      wins,
-      draws,
-      losses,
-      goalsScored,
-      goalsConceded,
-      cleanSheets,
-      topScorer: { name: topPlayer.name, goals: Math.max(2, Math.round(goalsScored * 0.45)) },
-      topAssister: { name: lineup[1]?.name || 'Playmaker', assists: Math.max(1, Math.round(goalsScored * 0.35)) },
-      bestPlayer: { name: topPlayer.name, rating: topPlayer.overall },
-    };
-
-    recordTournamentCompletion(record);
-    setCareer(loadCareer());
-    setCampaignSummary(record);
+  // Solo Campaign completion
+  const handleCampaignComplete = (summary: TournamentHistoryRecord) => {
+    setCampaignSummary(summary);
     setActiveTab('SUMMARY');
+
+    // Update career stats
+    recordTournamentCompletion(summary);
+    setCareer(loadCareer());
   };
 
-  // Play Again: restart campaign from Step 1
+  // Play Again from Solo Summary
   const handlePlayAgain = () => {
-    // Clear squad
-    const slots = FORMATIONS[formation].slots;
-    const freshXI: Record<string, Player | null> = {};
-    slots.forEach(s => { freshXI[s.id] = null; });
-    setStartingXI(freshXI);
     setTournament(null);
     setCampaignSummary(null);
     setRerollsRemaining(3);
+    const newXI: Record<string, Player | null> = {};
+    FORMATIONS[formation].slots.forEach(s => { newXI[s.id] = null; });
+    setStartingXI(newXI);
     setActiveTab('SETUP');
   };
 
   return (
-    <div className="min-h-screen bg-[#070b12] text-slate-100 flex flex-col font-sans">
-      {/* Top Bar with Step Navigation */}
+    <div className="min-h-screen bg-[#070b12] text-slate-100 flex flex-col font-sans selection:bg-red-600 selection:text-white">
+      {/* Top Persistent Navigation */}
       <Navbar
         activeTab={activeTab}
-        onSelectTab={(tab) => {
-          setActiveTab(tab);
-          sound.playCardSelect();
-        }}
+        onSelectTab={setActiveTab}
         soundEnabled={settings.soundEnabled}
         onToggleSound={() => {
           const updated = { ...settings, soundEnabled: !settings.soundEnabled };
@@ -286,8 +259,11 @@ export default function App() {
         }}
         onOpenCareer={() => setIsCareerOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenMultiplayer={() => setIsMultiplayerOpen(true)}
+        onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
         validLineupCount={selectedPlayerIdsInXI.length}
         hasCompletedCampaign={campaignSummary !== null}
+        activeRoomCode={multiplayerRoom?.code}
       />
 
       {/* Main Game Stage Surface */}
@@ -353,7 +329,69 @@ export default function App() {
             onPlayAgain={handlePlayAgain}
           />
         )}
+
+        {/* MULTIPLAYER: Head-to-Head Squad Building with Exclusive Draft Pool */}
+        {activeTab === 'MP_DRAFT' && multiplayerRoom && currentMemberId && (
+          <MultiplayerDraftView
+            room={multiplayerRoom}
+            currentMemberId={currentMemberId}
+            onRoomUpdated={setMultiplayerRoom}
+            onAdvanceToComparison={() => setActiveTab('MP_COMPARE')}
+          />
+        )}
+
+        {/* MULTIPLAYER: Head-to-Head Tactical Comparison */}
+        {activeTab === 'MP_COMPARE' && multiplayerRoom && currentMemberId && (
+          <H2HComparisonView
+            room={multiplayerRoom}
+            currentMemberId={currentMemberId}
+            onRoomUpdated={setMultiplayerRoom}
+            onLaunchMatch={() => setActiveTab('MP_MATCH')}
+            onBackToDraft={() => setActiveTab('MP_DRAFT')}
+          />
+        )}
+
+        {/* MULTIPLAYER: Direct Match Battle Simulation ("See If You Can Beat Them") */}
+        {activeTab === 'MP_MATCH' && multiplayerRoom && currentMemberId && (
+          <H2HMatchView
+            room={multiplayerRoom}
+            currentMemberId={currentMemberId}
+            onRoomUpdated={setMultiplayerRoom}
+            onReturnToLobby={() => {
+              setIsMultiplayerOpen(true);
+              setActiveTab('SETUP');
+            }}
+            onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
+          />
+        )}
       </main>
+
+      {/* Multiplayer Lobby Modal */}
+      {isMultiplayerOpen && (
+        <MultiplayerLobbyModal
+          currentRoom={multiplayerRoom}
+          currentMemberId={currentMemberId}
+          managerName={career.managerName}
+          clubName={career.clubName}
+          onRoomUpdated={(room, memberId) => {
+            setMultiplayerRoom(room);
+            setCurrentMemberId(memberId);
+          }}
+          onClose={() => setIsMultiplayerOpen(false)}
+          onStartDraft={() => {
+            setIsMultiplayerOpen(false);
+            setActiveTab('MP_DRAFT');
+          }}
+        />
+      )}
+
+      {/* Online Global Leaderboards Modal */}
+      {isLeaderboardOpen && (
+        <LeaderboardModal
+          currentManagerName={career.managerName}
+          onClose={() => setIsLeaderboardOpen(false)}
+        />
+      )}
 
       {/* Career Profile Modal */}
       {isCareerOpen && (

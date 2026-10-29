@@ -1,7 +1,7 @@
 import React from 'react';
-import { Volume2, VolumeX, HelpCircle, Trophy, Settings as SettingsIcon } from 'lucide-react';
+import { Volume2, VolumeX, HelpCircle, Trophy, Settings as SettingsIcon, Users, Award, Swords } from 'lucide-react';
 
-export type ActiveTab = 'SETUP' | 'SCOUT' | 'PLAY' | 'SUMMARY';
+export type ActiveTab = 'SETUP' | 'SCOUT' | 'PLAY' | 'SUMMARY' | 'MP_DRAFT' | 'MP_COMPARE' | 'MP_MATCH';
 
 interface NavbarProps {
   activeTab: ActiveTab;
@@ -12,8 +12,11 @@ interface NavbarProps {
   onToggleGuided: () => void;
   onOpenCareer: () => void;
   onOpenSettings: () => void;
+  onOpenMultiplayer: () => void;
+  onOpenLeaderboard: () => void;
   validLineupCount: number;
   hasCompletedCampaign: boolean;
+  activeRoomCode?: string | null;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -25,12 +28,15 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleGuided,
   onOpenCareer,
   onOpenSettings,
+  onOpenMultiplayer,
+  onOpenLeaderboard,
   validLineupCount,
   hasCompletedCampaign,
+  activeRoomCode,
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-[#090e17]/95 backdrop-blur-md border-b border-slate-800">
-      <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-4">
+      <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between gap-3">
         {/* Zone 1: RCL Brand Title and WIN IT ALL Badge */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => onSelectTab('SETUP')}>
@@ -48,12 +54,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
         </div>
 
-        {/* Zone 2: Navigation Links (Core Steps) */}
-        <nav className="flex items-center gap-1 sm:gap-2">
+        {/* Zone 2: Navigation Links (Core Steps & Multiplayer) */}
+        <nav className="flex items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar py-1">
           {/* Step 1: SETUP */}
           <button
             onClick={() => onSelectTab('SETUP')}
-            className={`px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap cursor-pointer ${
               activeTab === 'SETUP'
                 ? 'bg-red-600 text-white shadow-[0_0_12px_rgba(220,38,38,0.5)]'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -65,7 +71,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Step 2: SCOUT & DRAFT */}
           <button
             onClick={() => onSelectTab('SCOUT')}
-            className={`relative px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`relative px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap cursor-pointer ${
               activeTab === 'SCOUT'
                 ? 'bg-red-600 text-white shadow-[0_0_12px_rgba(220,38,38,0.5)]'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -82,7 +88,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Step 3: LIVE CUP */}
           <button
             onClick={() => onSelectTab('PLAY')}
-            className={`relative px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+            className={`relative px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap cursor-pointer ${
               activeTab === 'PLAY'
                 ? 'bg-emerald-600 text-white shadow-[0_0_12px_rgba(16,185,129,0.5)]'
                 : validLineupCount === 11
@@ -97,7 +103,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {hasCompletedCampaign && (
             <button
               onClick={() => onSelectTab('SUMMARY')}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition-all whitespace-nowrap cursor-pointer ${
                 activeTab === 'SUMMARY'
                   ? 'bg-amber-600 text-white shadow-[0_0_12px_rgba(245,158,11,0.5)]'
                   : 'text-amber-400 hover:text-white hover:bg-amber-950/40'
@@ -106,10 +112,49 @@ export const Navbar: React.FC<NavbarProps> = ({
               4. SUMMARY
             </button>
           )}
+
+          {/* Active Multiplayer Room Tab */}
+          {activeRoomCode && (
+            <button
+              onClick={() => {
+                if (activeTab === 'MP_MATCH') onSelectTab('MP_MATCH');
+                else if (activeTab === 'MP_COMPARE') onSelectTab('MP_COMPARE');
+                else onSelectTab('MP_DRAFT');
+              }}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-black tracking-wider transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer border ${
+                activeTab.startsWith('MP_')
+                  ? 'bg-red-600 text-white border-red-400 shadow-[0_0_12px_rgba(220,38,38,0.5)]'
+                  : 'bg-red-950/40 text-red-300 border-red-500/40 hover:bg-red-900/50'
+              }`}
+            >
+              <Swords className="w-3.5 h-3.5" />
+              <span>ROOM {activeRoomCode}</span>
+            </button>
+          )}
         </nav>
 
-        {/* Zone 3: Manager Profile & Controls */}
+        {/* Zone 3: Multiplayer, Leaderboard, & Controls */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Play Against Friends Button */}
+          <button
+            onClick={onOpenMultiplayer}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white text-xs font-bold rounded-lg shadow-[0_0_12px_rgba(220,38,38,0.4)] cursor-pointer transition"
+            title="Host or Join Multiplayer Room"
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">VS FRIENDS</span>
+          </button>
+
+          {/* Online Global Leaderboards */}
+          <button
+            onClick={onOpenLeaderboard}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold rounded-lg border border-amber-500/30 cursor-pointer transition"
+            title="Global Leaderboards"
+          >
+            <Award className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline">RANKS</span>
+          </button>
+
           {/* Guided Mode Toggle */}
           <button
             onClick={onToggleGuided}
@@ -136,15 +181,17 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             onClick={onOpenCareer}
             className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition-colors border border-slate-700 cursor-pointer"
+            title="Manager Profile"
           >
             <Trophy className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden md:inline">CAREER</span>
+            <span className="hidden lg:inline">CAREER</span>
           </button>
 
           {/* Settings */}
           <button
             onClick={onOpenSettings}
             className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+            title="Game Settings"
           >
             <SettingsIcon className="w-4 h-4" />
           </button>

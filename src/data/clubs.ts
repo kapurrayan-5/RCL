@@ -2,11 +2,13 @@ import { ClubSeason, Player } from '../types/game';
 import { HISTORICAL_CLUBS } from './clubsDatabase';
 import { MORE_CLUBS } from './moreClubsDatabase';
 import { INTERNATIONAL_SQUADS } from './internationalClubs';
+import { CULT_AND_UNDERDOG_CLUBS } from './cultClubsDatabase';
 
 export const ALL_CLUBS: ClubSeason[] = [
   ...INTERNATIONAL_SQUADS,
   ...HISTORICAL_CLUBS,
   ...MORE_CLUBS,
+  ...CULT_AND_UNDERDOG_CLUBS,
 ];
 
 // Flat list of all unique players across all clubs
