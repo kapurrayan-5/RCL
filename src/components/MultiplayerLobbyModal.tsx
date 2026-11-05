@@ -44,6 +44,14 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     }
   }, [currentRoom]);
 
+  // Auto-transition when Host launches the draft or match
+  useEffect(() => {
+    if (currentRoom?.status === 'DRAFT' || currentRoom?.status === 'READY_BATTLE' || currentRoom?.status === 'MATCH') {
+      sound.playGoalCelebration();
+      onStartDraft();
+    }
+  }, [currentRoom?.status, onStartDraft]);
+
   const isHost = currentRoom && currentMemberId ? currentRoom.hostId === currentMemberId : false;
   const currentMember = currentRoom?.members.find(m => m.id === currentMemberId);
   const maxCapacity = currentRoom ? (currentRoom.mode === '1v1' ? 2 : currentRoom.mode === 'TOURNAMENT_4' ? 4 : 8) : 2;
@@ -59,6 +67,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
         customCode.trim() || undefined
       );
       sound.playCardSelect();
+      setError(null);
       onRoomUpdated(room, newId);
     } catch (err: any) {
       console.error('[RCL Lobby] Create room error:', err);
@@ -83,24 +92,25 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     setLoading(true);
     setError(null);
     try {
-      // Connect client P2P listener
-      try {
-        initClientP2P(clean, managerName || 'Challenger', clubName || 'Challenger XI', (updated, memId) => {
-          if (updated) {
-            onRoomUpdated(updated, memId || currentMemberId || updated.members[updated.members.length - 1]?.id);
-          }
-        });
-      } catch {
-        // ignore
-      }
-
       const { room, currentMemberId: newId } = await joinRoomApi(
         clean,
         managerName || 'Challenger',
         clubName || 'Challenger XI'
       );
+      setError(null);
       sound.playCardSelect();
       onRoomUpdated(room, newId);
+
+      // Connect secondary P2P listener in background for cross-window mesh
+      try {
+        initClientP2P(clean, managerName || 'Challenger', clubName || 'Challenger XI', (updated, memId) => {
+          if (updated) {
+            onRoomUpdated(updated, memId || newId);
+          }
+        });
+      } catch {
+        // ignore
+      }
     } catch (err: any) {
       console.error('[RCL Lobby] Join room error:', err);
       setError(err.message || 'Failed to join room. Verify the room code and that the host is waiting.');

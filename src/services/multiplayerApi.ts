@@ -182,8 +182,13 @@ export async function joinRoomApi(
   memberName: string,
   clubName: string
 ): Promise<{ room: MultiplayerRoom; currentMemberId: string }> {
-  const roomCode = (code || '').trim().toUpperCase();
+  let roomCode = (code || '').trim().toUpperCase();
+  // Auto-prefix RCL- if user only entered digits e.g. "382"
+  if (/^\d{3,4}$/.test(roomCode)) {
+    roomCode = `RCL-${roomCode}`;
+  }
 
+  // 1. Authoritative Server Request
   try {
     const res = await fetch('/api/rooms/join', {
       method: 'POST',
@@ -200,10 +205,37 @@ export async function joinRoomApi(
     } else {
       const err = await res.json().catch(() => null);
       if (err?.error) {
-        // If server gave an error like "room full" or "started", surface it immediately!
-        if (err.error.includes('capacity') || err.error.includes('started')) {
-          throw new Error(err.error);
+        // If server says not found, check if host created it in local storage (e.g. cross-tab on same machine)
+        if (err.error.toLowerCase().includes('not found')) {
+          const localRoom = getLocalRoom(roomCode);
+          if (localRoom) {
+            try {
+              // Sync local room to server and retry join
+              const syncRes = await fetch('/api/rooms/sync', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ room: localRoom }),
+              });
+              if (syncRes.ok) {
+                const retryRes = await fetch('/api/rooms/join', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ code: roomCode, memberName, clubName }),
+                });
+                if (retryRes.ok) {
+                  const retryData = await retryRes.json();
+                  if (retryData?.room) {
+                    saveLocalRoom(retryData.room);
+                    return retryData;
+                  }
+                }
+              }
+            } catch {
+              // ignore sync failure
+            }
+          }
         }
+        throw new Error(err.error);
       }
     }
   } catch (err: any) {
@@ -213,10 +245,10 @@ export async function joinRoomApi(
     console.warn('[RCL] Server join room endpoint warning:', err);
   }
 
-  // Check local fallback (works across tabs in same browser)
+  // 2. Check local fallback (works across tabs in same browser if server unreachable)
   const localRoom = getLocalRoom(roomCode);
   if (!localRoom) {
-    throw new Error(`Room "${roomCode}" not found. Make sure the host has created the room and verify the code.`);
+    throw new Error(`Room "${roomCode}" not found. Verify the code with the host.`);
   }
 
   const cleanName = (memberName && memberName.trim()) ? memberName.trim() : 'Challenger';
@@ -236,7 +268,7 @@ export async function joinRoomApi(
   const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
   const newMember: RoomMember = {
     id: memberId,
-    name: cleanName,
+    name: localRoom.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase()) ? `${cleanName} (2)` : cleanName,
     clubName: clubName || 'Challenger XI',
     avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
     isHost: false,
@@ -772,7 +804,12 @@ export function subscribeToRoomSocket(
   let reconnectTimer: any = null;
   let pollInterval: any = null;
 
-  // 1. Cross-tab Broadcast Channel listener
+  // 1. Immediately fetch fresh room state on mount
+  getRoomApi(roomCode).then(r => {
+    if (r && !isClosed) onUpdate(r);
+  }).catch(() => {});
+
+  // 2. Cross-tab Broadcast Channel listener
   const handleBcMessage = (event: MessageEvent) => {
     if (event.data?.type === 'ROOM_UPDATE' && event.data?.room) {
       const incCode = event.data.room.code.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -784,7 +821,7 @@ export function subscribeToRoomSocket(
   };
   mpChannel?.addEventListener('message', handleBcMessage);
 
-  // 2. Storage event listener (across browser tabs)
+  // 3. Storage event listener (across browser tabs)
   const handleStorageEvent = (e: StorageEvent) => {
     if (e.key && e.key.startsWith('rcl_room_') && e.newValue) {
       try {
@@ -801,18 +838,18 @@ export function subscribeToRoomSocket(
   };
   window.addEventListener('storage', handleStorageEvent);
 
-  // 3. Fast Polling every 1.5 seconds (reliable fallback across environments)
+  // 4. Fast Polling every 800ms (reliable real-time sync across devices and proxies)
   pollInterval = setInterval(async () => {
     if (isClosed) return;
     try {
       const room = await getRoomApi(roomCode);
-      if (room) onUpdate(room);
+      if (room && !isClosed) onUpdate(room);
     } catch {
       // ignore
     }
-  }, 1500);
+  }, 800);
 
-  // 4. WebSocket connection using explicit /ws path
+  // 5. WebSocket connection using explicit /ws path
   function connect() {
     if (isClosed) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -839,7 +876,7 @@ export function subscribeToRoomSocket(
 
       ws.onclose = () => {
         if (!isClosed) {
-          reconnectTimer = setTimeout(connect, 3000);
+          reconnectTimer = setTimeout(connect, 2000);
         }
       };
 
@@ -848,7 +885,7 @@ export function subscribeToRoomSocket(
       };
     } catch {
       if (!isClosed) {
-        reconnectTimer = setTimeout(connect, 3000);
+        reconnectTimer = setTimeout(connect, 2000);
       }
     }
   }

@@ -101,26 +101,28 @@ export default function App() {
     sound.setMuted(!settings.soundEnabled);
   }, [settings.soundEnabled]);
 
-  // Subscribe to real-time room updates via WebSocket
+  // Subscribe to real-time room updates via WebSocket & Polling
   useEffect(() => {
-    if (!multiplayerRoom || !currentMemberId) return;
+    if (!multiplayerRoom?.code || !currentMemberId) return;
 
     const cleanup = subscribeToRoomSocket(multiplayerRoom.code, currentMemberId, (updatedRoom) => {
       setMultiplayerRoom(updatedRoom);
 
       // Auto-transition UI when room progresses
-      if (updatedRoom.status === 'DRAFT' && activeTab !== 'MP_DRAFT') {
-        setActiveTab('MP_DRAFT');
+      if (updatedRoom.status === 'DRAFT') {
         setIsMultiplayerOpen(false);
-      } else if (updatedRoom.status === 'READY_BATTLE' && activeTab !== 'MP_COMPARE') {
+        setActiveTab('MP_DRAFT');
+      } else if (updatedRoom.status === 'READY_BATTLE') {
+        setIsMultiplayerOpen(false);
         setActiveTab('MP_COMPARE');
-      } else if ((updatedRoom.status === 'MATCH' || updatedRoom.status === 'COMPLETED') && activeTab !== 'MP_MATCH') {
+      } else if (updatedRoom.status === 'MATCH' || updatedRoom.status === 'COMPLETED') {
+        setIsMultiplayerOpen(false);
         setActiveTab('MP_MATCH');
       }
     });
 
     return cleanup;
-  }, [multiplayerRoom?.code, currentMemberId, activeTab]);
+  }, [multiplayerRoom?.code, currentMemberId]);
 
   // Derived scouted clubs
   const scoutedClubs = useMemo(() => {

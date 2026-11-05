@@ -109,11 +109,15 @@ let globalLeaderboard: LeaderboardEntry[] = [
 
 function broadcastToRoom(code: string, payload: any) {
   const message = JSON.stringify(payload);
+  const targetClean = (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       const info = clientRooms.get(client);
-      if (info && info.roomCode === code.toUpperCase()) {
-        client.send(message);
+      if (info) {
+        const clientClean = (info.roomCode || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (clientClean === targetClean || info.roomCode === code.toUpperCase()) {
+          client.send(message);
+        }
       }
     }
   });
@@ -133,8 +137,9 @@ wss.on('connection', (ws: WebSocket) => {
       const msg = JSON.parse(data.toString());
       if (msg.type === 'SUBSCRIBE_ROOM') {
         const { roomCode, memberId } = msg;
-        clientRooms.set(ws, { roomCode: roomCode.toUpperCase(), memberId });
-        const room = rooms.get(roomCode.toUpperCase());
+        const normCode = (roomCode || '').toUpperCase().trim();
+        clientRooms.set(ws, { roomCode: normCode, memberId });
+        const room = findRoomByCode(normCode);
         if (room) {
           ws.send(JSON.stringify({ type: 'ROOM_UPDATE', room }));
         }
@@ -351,7 +356,7 @@ app.post('/api/rooms/create', (req, res) => {
 // Join Room (Smart code matching, reconnect-friendly)
 app.post('/api/rooms/join', (req, res) => {
   try {
-    const { code, memberName, clubName } = req.body || {};
+    const { code, memberName, clubName, memberId: requestedMemberId } = req.body || {};
     const room = findRoomByCode(code);
 
     if (!room) {
@@ -359,11 +364,23 @@ app.post('/api/rooms/join', (req, res) => {
       return res.status(404).json({ error: `Room "${code}" not found. Please verify the room code.` });
     }
 
-    const cleanName = (memberName && memberName.trim()) ? memberName.trim() : `Challenger`;
+    // 1. Check if user is reconnecting by existing member ID
+    if (requestedMemberId) {
+      const existingById = room.members.find(m => m.id === requestedMemberId);
+      if (existingById) {
+        existingById.ready = true;
+        room.updatedAt = Date.now();
+        persistRoomsToDisk(rooms);
+        broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+        return res.json({ room, currentMemberId: existingById.id });
+      }
+    }
 
-    // 1. Check if user with same name is reconnecting
+    let cleanName = (memberName && memberName.trim()) ? memberName.trim() : `Challenger`;
+
+    // 2. Check if a non-host member with the exact same name is already in the room reconnecting
     const existingMember = room.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase());
-    if (existingMember) {
+    if (existingMember && !existingMember.isHost) {
       existingMember.ready = true;
       room.updatedAt = Date.now();
       persistRoomsToDisk(rooms);
@@ -372,7 +389,16 @@ app.post('/api/rooms/join', (req, res) => {
       return res.json({ room, currentMemberId: existingMember.id });
     }
 
-    // 2. Capacity check
+    // If cleanName matches host's name, disambiguate so we do NOT overwrite or hijack the host's slot
+    if (room.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase())) {
+      let counter = 2;
+      while (room.members.some(m => m.name.toLowerCase() === `${cleanName} (${counter})`.toLowerCase())) {
+        counter++;
+      }
+      cleanName = `${cleanName} (${counter})`;
+    }
+
+    // 3. Capacity check
     const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
     if (room.members.length >= maxCapacity) {
       return res.status(400).json({ error: 'This room is already at full capacity.' });
@@ -424,7 +450,7 @@ app.post('/api/rooms/join', (req, res) => {
     persistRoomsToDisk(rooms);
 
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-    console.log(`[RCL Server] Member ${newMember.name} joined room ${room.code}`);
+    console.log(`[RCL Server] Member ${newMember.name} joined room ${room.code} (total: ${room.members.length})`);
     res.json({ room, currentMemberId: memberId });
   } catch (err: any) {
     console.error('[RCL Server] Error joining room:', err);

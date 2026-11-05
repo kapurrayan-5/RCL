@@ -101,5 +101,331 @@
     "bracket": null,
     "createdAt": 1793259108798,
     "updatedAt": 1793259108823
+  },
+  "RCL-TEST1": {
+    "code": "RCL-TEST1",
+    "name": "HostUser's Room",
+    "mode": "1v1",
+    "status": "LOBBY",
+    "hostId": "usr-5vwbhqh",
+    "members": [
+      {
+        "id": "usr-5vwbhqh",
+        "name": "HostUser",
+        "clubName": "Host XI",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": false,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-5vwbhqh",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "eng-1966",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1793854231244,
+    "updatedAt": 1793854231244
+  },
+  "RCL-733": {
+    "code": "RCL-733",
+    "name": "Alex's Room",
+    "mode": "1v1",
+    "status": "DRAFT",
+    "hostId": "usr-er99ydf",
+    "members": [
+      {
+        "id": "usr-er99ydf",
+        "name": "Alex",
+        "clubName": "Arsenal 2004",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": false,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      },
+      {
+        "id": "usr-svbmi32",
+        "name": "Dave",
+        "clubName": "Chelsea 2005",
+        "avatar": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces",
+        "isHost": false,
+        "ready": true,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-er99ydf",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "atm-2013-14",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1793854383271,
+    "updatedAt": 1793854432555
+  },
+  "RCL-625": {
+    "code": "RCL-625",
+    "name": "Alex Mercer's Room",
+    "mode": "1v1",
+    "status": "LOBBY",
+    "hostId": "usr-6gjel5a",
+    "members": [
+      {
+        "id": "usr-6gjel5a",
+        "name": "Alex Mercer",
+        "clubName": "RCL All-Stars FC",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": true,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-6gjel5a",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "juv-2002-03",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1793854689419,
+    "updatedAt": 1793854689435
+  },
+  "RCL-985": {
+    "code": "RCL-985",
+    "name": "Alex Mercer's Room",
+    "mode": "1v1",
+    "status": "DRAFT",
+    "hostId": "usr-6g3bhg2",
+    "members": [
+      {
+        "id": "usr-6g3bhg2",
+        "name": "Alex Mercer",
+        "clubName": "RCL All-Stars FC",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": false,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      },
+      {
+        "id": "usr-sbbgs8b",
+        "name": "Alex Mercer (2)",
+        "clubName": "Challenger FC",
+        "avatar": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces",
+        "isHost": false,
+        "ready": true,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-6g3bhg2",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "ars-2003-04",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1793854712415,
+    "updatedAt": 1793854712440
   }
 }
