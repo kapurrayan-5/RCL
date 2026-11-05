@@ -2,6 +2,7 @@ import { FormationType, Player, TeamTactics } from '../types/game';
 import { LeaderboardEntry, MultiplayerMode, MultiplayerRoom, RoomMember } from '../types/multiplayer';
 import { ALL_CLUBS, getRandomClub } from '../data/clubs';
 import { FORMATIONS } from '../utils/formation';
+import { initHostP2P, broadcastP2P } from './p2pSync';
 
 // Cross-tab broadcast channel for instant multi-window local sync
 const mpChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
@@ -9,21 +10,40 @@ const mpChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
   : null;
 
 // Local room storage helpers
-function getLocalRoom(code: string): MultiplayerRoom | null {
+export function getLocalRoom(code: string): MultiplayerRoom | null {
   try {
-    const raw = localStorage.getItem(`rcl_room_${code.toUpperCase()}`);
-    return raw ? JSON.parse(raw) : null;
+    const clean = code.trim().toUpperCase();
+    const raw = localStorage.getItem(`rcl_room_${clean}`);
+    if (raw) return JSON.parse(raw);
+
+    // Try without prefix/hyphen
+    const stripped = clean.replace(/[^A-Z0-9]/g, '');
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('rcl_room_')) {
+        const itemCode = key.replace('rcl_room_', '').replace(/[^A-Z0-9]/g, '');
+        if (itemCode === stripped || (stripped.length >= 3 && itemCode.endsWith(stripped))) {
+          const itemVal = localStorage.getItem(key);
+          if (itemVal) return JSON.parse(itemVal);
+        }
+      }
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-function saveLocalRoom(room: MultiplayerRoom) {
+export function saveLocalRoom(room: MultiplayerRoom) {
   try {
-    localStorage.setItem(`rcl_room_${room.code.toUpperCase()}`, JSON.stringify(room));
+    const code = room.code.trim().toUpperCase();
+    localStorage.setItem(`rcl_room_${code}`, JSON.stringify(room));
+    localStorage.setItem('rcl_last_active_room', code);
     if (mpChannel) {
       mpChannel.postMessage({ type: 'ROOM_UPDATE', room });
     }
+    // Also push to P2P network if connected
+    broadcastP2P({ type: 'ROOM_UPDATE', room });
   } catch {
     // ignore
   }
@@ -47,7 +67,7 @@ function createLocalFallbackRoom(
     clubName: clubName || 'RCL Dream XI',
     avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces',
     isHost: true,
-    ready: false,
+    ready: true,
     formation: '4-3-3',
     tactics: {
       buildup: 'Direct',
@@ -115,15 +135,46 @@ export async function createRoomApi(
       const data = await res.json();
       if (data?.room) {
         saveLocalRoom(data.room);
+        // Start P2P WebRTC host listener
+        try {
+          initHostP2P(data.room, (updated) => {
+            saveLocalRoom(updated);
+          });
+        } catch {
+          // ignore
+        }
         return data;
       }
+    } else {
+      const err = await res.json().catch(() => null);
+      if (err?.error) throw new Error(err.error);
     }
-  } catch (err) {
-    console.warn('[RCL] Server create room endpoint unavailable, using local sync engine:', err);
+  } catch (err: any) {
+    console.warn('[RCL] Server create room endpoint warning:', err);
+    if (err.message && !err.message.includes('fetch')) {
+      throw err;
+    }
   }
 
-  // Graceful fallback: Never error or block user
-  return createLocalFallbackRoom(hostName, clubName, mode, customCode);
+  // Graceful fallback
+  const fallback = createLocalFallbackRoom(hostName, clubName, mode, customCode);
+
+  // Sync to server in background
+  fetch('/api/rooms/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room: fallback.room }),
+  }).catch(() => {});
+
+  try {
+    initHostP2P(fallback.room, (updated) => {
+      saveLocalRoom(updated);
+    });
+  } catch {
+    // ignore
+  }
+
+  return fallback;
 }
 
 export async function joinRoomApi(
@@ -146,30 +197,50 @@ export async function joinRoomApi(
         saveLocalRoom(data.room);
         return data;
       }
+    } else {
+      const err = await res.json().catch(() => null);
+      if (err?.error) {
+        // If server gave an error like "room full" or "started", surface it immediately!
+        if (err.error.includes('capacity') || err.error.includes('started')) {
+          throw new Error(err.error);
+        }
+      }
     }
-  } catch (err) {
-    console.warn('[RCL] Server join room endpoint unavailable, checking local storage:', err);
+  } catch (err: any) {
+    if (err.message && !err.message.includes('fetch') && !err.message.includes('network')) {
+      throw err;
+    }
+    console.warn('[RCL] Server join room endpoint warning:', err);
   }
 
-  // Check local fallback
+  // Check local fallback (works across tabs in same browser)
   const localRoom = getLocalRoom(roomCode);
   if (!localRoom) {
-    throw new Error(`Room "${roomCode}" not found. Verify room code.`);
+    throw new Error(`Room "${roomCode}" not found. Make sure the host has created the room and verify the code.`);
+  }
+
+  const cleanName = (memberName && memberName.trim()) ? memberName.trim() : 'Challenger';
+  const existing = localRoom.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase());
+  if (existing) {
+    existing.ready = true;
+    localRoom.updatedAt = Date.now();
+    saveLocalRoom(localRoom);
+    return { room: localRoom, currentMemberId: existing.id };
   }
 
   const maxCapacity = localRoom.mode === '1v1' ? 2 : localRoom.mode === 'TOURNAMENT_4' ? 4 : 8;
   if (localRoom.members.length >= maxCapacity) {
-    throw new Error('Room is already full.');
+    throw new Error('This room is already at full capacity.');
   }
 
   const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
   const newMember: RoomMember = {
     id: memberId,
-    name: memberName || `Manager ${localRoom.members.length + 1}`,
+    name: cleanName,
     clubName: clubName || 'Challenger XI',
     avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
     isHost: false,
-    ready: false,
+    ready: true,
     formation: '4-3-3',
     tactics: {
       buildup: 'Direct',
@@ -202,6 +273,13 @@ export async function joinRoomApi(
   localRoom.members.push(newMember);
   localRoom.updatedAt = Date.now();
   saveLocalRoom(localRoom);
+
+  // Sync to server
+  fetch('/api/rooms/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room: localRoom }),
+  }).catch(() => {});
 
   return { room: localRoom, currentMemberId: memberId };
 }
@@ -279,6 +357,13 @@ export async function addBotApi(code: string): Promise<MultiplayerRoom> {
   local.members.push(botMember);
   local.updatedAt = Date.now();
   saveLocalRoom(local);
+
+  fetch('/api/rooms/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room: local }),
+  }).catch(() => {});
+
   return local;
 }
 
@@ -689,18 +774,26 @@ export function subscribeToRoomSocket(
 
   // 1. Cross-tab Broadcast Channel listener
   const handleBcMessage = (event: MessageEvent) => {
-    if (event.data?.type === 'ROOM_UPDATE' && event.data?.room?.code?.toUpperCase() === roomCode) {
-      onUpdate(event.data.room);
+    if (event.data?.type === 'ROOM_UPDATE' && event.data?.room) {
+      const incCode = event.data.room.code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
+      if (incCode === curCode) {
+        onUpdate(event.data.room);
+      }
     }
   };
   mpChannel?.addEventListener('message', handleBcMessage);
 
   // 2. Storage event listener (across browser tabs)
   const handleStorageEvent = (e: StorageEvent) => {
-    if (e.key === `rcl_room_${roomCode}` && e.newValue) {
+    if (e.key && e.key.startsWith('rcl_room_') && e.newValue) {
       try {
         const parsed = JSON.parse(e.newValue);
-        onUpdate(parsed);
+        const incCode = (parsed.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
+        if (incCode === curCode) {
+          onUpdate(parsed);
+        }
       } catch {
         // ignore
       }
@@ -708,7 +801,7 @@ export function subscribeToRoomSocket(
   };
   window.addEventListener('storage', handleStorageEvent);
 
-  // 3. Fallback Polling every 2.5 seconds (ensures sync if WebSockets are blocked by proxies)
+  // 3. Fast Polling every 1.5 seconds (reliable fallback across environments)
   pollInterval = setInterval(async () => {
     if (isClosed) return;
     try {
@@ -717,13 +810,13 @@ export function subscribeToRoomSocket(
     } catch {
       // ignore
     }
-  }, 2500);
+  }, 1500);
 
-  // 4. WebSocket connection
+  // 4. WebSocket connection using explicit /ws path
   function connect() {
     if (isClosed) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
 
     try {
       ws = new WebSocket(wsUrl);

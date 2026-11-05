@@ -1,0 +1,105 @@
+{
+  "RCL-999": {
+    "code": "RCL-999",
+    "name": "Manager1's Room",
+    "mode": "1v1",
+    "status": "LOBBY",
+    "hostId": "usr-34bcth0",
+    "members": [
+      {
+        "id": "usr-34bcth0",
+        "name": "Manager1",
+        "clubName": "RCL Dream XI",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": false,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      },
+      {
+        "id": "usr-x9fbd37",
+        "name": "FriendManager",
+        "clubName": "Friend XI",
+        "avatar": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces",
+        "isHost": false,
+        "ready": true,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-34bcth0",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "nap-2022-23",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1793259108798,
+    "updatedAt": 1793259108823
+  }
+}

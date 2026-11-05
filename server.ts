@@ -2,6 +2,7 @@ import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { MultiplayerRoom, RoomMember, HeadToHeadMatchState, MatchLiveEvent, LeaderboardEntry, MultiplayerMode } from './src/types/multiplayer';
 import { ALL_CLUBS, getRandomClub } from './src/data/clubs';
@@ -28,11 +29,71 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+// Explicit /ws path to prevent collision with Vite dev server HMR/middlewares
+const wss = new WebSocketServer({ server, path: '/ws' });
 
-// In-Memory Storage
-const rooms = new Map<string, MultiplayerRoom>();
+// Disk Persistence for Multiplayer Rooms
+const ROOMS_FILE = path.resolve(__dirname, '.rcl_rooms.json');
+
+function loadRoomsFromDisk(): Map<string, MultiplayerRoom> {
+  const map = new Map<string, MultiplayerRoom>();
+  try {
+    if (fs.existsSync(ROOMS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ROOMS_FILE, 'utf-8'));
+      Object.entries(data).forEach(([code, room]) => {
+        map.set(code.toUpperCase(), room as MultiplayerRoom);
+      });
+    }
+  } catch (err) {
+    console.error('Failed to load rooms from disk:', err);
+  }
+  return map;
+}
+
+function persistRoomsToDisk(map: Map<string, MultiplayerRoom>) {
+  try {
+    const obj: Record<string, MultiplayerRoom> = {};
+    map.forEach((room, code) => {
+      obj[code.toUpperCase()] = room;
+    });
+    fs.writeFileSync(ROOMS_FILE, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to persist rooms to disk:', err);
+  }
+}
+
+// In-Memory Storage initialized from disk cache
+const rooms = loadRoomsFromDisk();
 const clientRooms = new Map<WebSocket, { roomCode: string; memberId: string }>();
+
+// Find room by code with smart normalization (handles RCL-123, rcl-123, 123, spaces, etc.)
+function findRoomByCode(rawCode: string): MultiplayerRoom | undefined {
+  if (!rawCode) return undefined;
+  const upper = rawCode.trim().toUpperCase();
+  if (rooms.has(upper)) return rooms.get(upper);
+
+  const clean = upper.replace(/[^A-Z0-9]/g, '');
+  for (const [key, room] of rooms.entries()) {
+    if (key.replace(/[^A-Z0-9]/g, '') === clean) {
+      return room;
+    }
+    // Match suffix if user only entered digits e.g. "482"
+    if (clean.length >= 3 && key.endsWith(clean)) {
+      return room;
+    }
+  }
+
+  // Reload from disk in case updated by another worker/process
+  const diskRooms = loadRoomsFromDisk();
+  for (const [key, room] of diskRooms.entries()) {
+    rooms.set(key, room);
+    if (key === upper || key.replace(/[^A-Z0-9]/g, '') === clean || (clean.length >= 3 && key.endsWith(clean))) {
+      return room;
+    }
+  }
+
+  return undefined;
+}
 
 // Seed Global Leaderboard with Legendary & Cult Managers
 let globalLeaderboard: LeaderboardEntry[] = [
@@ -278,6 +339,7 @@ app.post('/api/rooms/create', (req, res) => {
     };
 
     rooms.set(code, room);
+    persistRoomsToDisk(rooms);
     console.log(`[RCL Server] Created room ${code} for ${hostMember.name}`);
     res.json({ room, currentMemberId: hostId });
   } catch (err: any) {
@@ -286,34 +348,48 @@ app.post('/api/rooms/create', (req, res) => {
   }
 });
 
-// Join Room
+// Join Room (Smart code matching, reconnect-friendly)
 app.post('/api/rooms/join', (req, res) => {
   try {
     const { code, memberName, clubName } = req.body || {};
-    const roomCode = (code || '').trim().toUpperCase();
-    const room = rooms.get(roomCode);
+    const room = findRoomByCode(code);
 
     if (!room) {
-      return res.status(404).json({ error: 'Room not found. Check code and try again.' });
+      console.warn(`[RCL Server] Join failed: room not found for input "${code}"`);
+      return res.status(404).json({ error: `Room "${code}" not found. Please verify the room code.` });
     }
 
+    const cleanName = (memberName && memberName.trim()) ? memberName.trim() : `Challenger`;
+
+    // 1. Check if user with same name is reconnecting
+    const existingMember = room.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase());
+    if (existingMember) {
+      existingMember.ready = true;
+      room.updatedAt = Date.now();
+      persistRoomsToDisk(rooms);
+      broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+      console.log(`[RCL Server] Member ${cleanName} reconnected to room ${room.code}`);
+      return res.json({ room, currentMemberId: existingMember.id });
+    }
+
+    // 2. Capacity check
     const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
     if (room.members.length >= maxCapacity) {
-      return res.status(400).json({ error: 'Room is already full.' });
+      return res.status(400).json({ error: 'This room is already at full capacity.' });
     }
 
     if (room.status !== 'LOBBY') {
-      return res.status(400).json({ error: 'Match/Draft has already started in this room.' });
+      return res.status(400).json({ error: 'The match or draft has already started in this room.' });
     }
 
     const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
     const newMember: RoomMember = {
       id: memberId,
-      name: (memberName && memberName.trim()) ? memberName.trim() : `Manager ${room.members.length + 1}`,
+      name: cleanName,
       clubName: (clubName && clubName.trim()) ? clubName.trim() : `Challenger XI`,
       avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
       isHost: false,
-      ready: false,
+      ready: true,
       formation: '4-3-3',
       tactics: {
         buildup: 'Direct',
@@ -345,9 +421,10 @@ app.post('/api/rooms/join', (req, res) => {
 
     room.members.push(newMember);
     room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
 
-    broadcastToRoom(roomCode, { type: 'ROOM_UPDATE', room });
-    console.log(`[RCL Server] Member ${newMember.name} joined room ${roomCode}`);
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    console.log(`[RCL Server] Member ${newMember.name} joined room ${room.code}`);
     res.json({ room, currentMemberId: memberId });
   } catch (err: any) {
     console.error('[RCL Server] Error joining room:', err);
@@ -355,12 +432,27 @@ app.post('/api/rooms/join', (req, res) => {
   }
 });
 
+// Sync Room (Client-to-server sync bridge)
+app.post('/api/rooms/sync', (req, res) => {
+  try {
+    const { room } = req.body || {};
+    if (room && room.code) {
+      rooms.set(room.code.toUpperCase(), room);
+      persistRoomsToDisk(rooms);
+      broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+      return res.json({ success: true, room });
+    }
+    res.status(400).json({ error: 'Room payload required' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Add Bot Challenger into room
 app.post('/api/rooms/add-bot', (req, res) => {
   try {
     const { code } = req.body || {};
-    const roomCode = (code || '').trim().toUpperCase();
-    const room = rooms.get(roomCode);
+    const room = findRoomByCode(code);
 
     if (!room) {
       return res.status(404).json({ error: 'Room not found' });
@@ -421,9 +513,10 @@ app.post('/api/rooms/add-bot', (req, res) => {
 
     room.members.push(botMember);
     room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
 
-    broadcastToRoom(roomCode, { type: 'ROOM_UPDATE', room });
-    console.log(`[RCL Server] Bot ${botMember.name} added to room ${roomCode}`);
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    console.log(`[RCL Server] Bot ${botMember.name} added to room ${room.code}`);
     res.json({ room, botMember });
   } catch (err: any) {
     console.error('[RCL Server] Error adding bot:', err);
@@ -434,7 +527,7 @@ app.post('/api/rooms/add-bot', (req, res) => {
 // Get Room State
 app.get('/api/rooms/:code', (req, res) => {
   try {
-    const room = rooms.get(req.params.code.toUpperCase());
+    const room = findRoomByCode(req.params.code);
     if (!room) {
       return res.status(404).json({ error: 'Room not found' });
     }
@@ -448,7 +541,7 @@ app.get('/api/rooms/:code', (req, res) => {
 app.post('/api/rooms/start-draft', (req, res) => {
   try {
     const { code, memberId } = req.body || {};
-    const room = rooms.get((code || '').toUpperCase());
+    const room = findRoomByCode(code);
     if (!room) return res.status(404).json({ error: 'Room not found' });
     if (room.hostId !== memberId) return res.status(403).json({ error: 'Only host can start draft' });
 
@@ -458,6 +551,7 @@ app.post('/api/rooms/start-draft', (req, res) => {
     room.claimedPlayerIds = [];
     room.activeSquadId = getRandomClub().id;
     room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
 
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
     res.json({ room });
@@ -470,7 +564,7 @@ app.post('/api/rooms/start-draft', (req, res) => {
 app.post('/api/rooms/draft-pick', (req, res) => {
   try {
     const { code, memberId, playerId, slotId } = req.body || {};
-    const room = rooms.get((code || '').toUpperCase());
+    const room = findRoomByCode(code);
     if (!room) return res.status(404).json({ error: 'Room not found' });
 
     if (room.status !== 'DRAFT') {
@@ -516,6 +610,7 @@ app.post('/api/rooms/draft-pick', (req, res) => {
     }
 
     room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
 
     // If next member is a bot and draft is still active, perform bot turn after small tick
@@ -523,6 +618,7 @@ app.post('/api/rooms/draft-pick', (req, res) => {
     if (nextMember && nextMember.isBot && room.status === 'DRAFT') {
       setTimeout(() => {
         performBotTurn(room);
+        persistRoomsToDisk(rooms);
       }, 500);
     }
 
@@ -536,7 +632,7 @@ app.post('/api/rooms/draft-pick', (req, res) => {
 app.post('/api/rooms/reroll', (req, res) => {
   try {
     const { code, memberId } = req.body || {};
-    const room = rooms.get((code || '').toUpperCase());
+    const room = findRoomByCode(code);
     if (!room) return res.status(404).json({ error: 'Room not found' });
 
     const member = room.members.find(m => m.id === memberId);
@@ -550,6 +646,7 @@ app.post('/api/rooms/reroll', (req, res) => {
     const nextSquad = getRandomClub([room.activeSquadId]);
     room.activeSquadId = nextSquad.id;
     room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
 
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
     res.json({ room });
@@ -560,105 +657,119 @@ app.post('/api/rooms/reroll', (req, res) => {
 
 // Update Member Tactics & Formation
 app.post('/api/rooms/update-tactics', (req, res) => {
-  const { code, memberId, formation, tactics } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
+  try {
+    const { code, memberId, formation, tactics } = req.body || {};
+    const room = findRoomByCode(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
 
-  const member = room.members.find(m => m.id === memberId);
-  if (!member) return res.status(404).json({ error: 'Member not found' });
+    const member = room.members.find(m => m.id === memberId);
+    if (!member) return res.status(404).json({ error: 'Member not found' });
 
-  if (formation && formation !== member.formation) {
-    member.formation = formation as any;
-    // Map existing players to new slots
-    const newConfig = FORMATIONS[formation as keyof typeof FORMATIONS];
-    if (newConfig) {
-      const newXI: Record<string, Player | null> = {};
-      const unassigned = Object.values(member.startingXI).filter((p): p is Player => p !== null);
-      newConfig.slots.forEach((s) => { newXI[s.id] = null; });
-      unassigned.forEach((p, idx) => {
-        if (newConfig.slots[idx]) newXI[newConfig.slots[idx].id] = p;
-      });
-      member.startingXI = newXI;
+    if (formation && formation !== member.formation) {
+      member.formation = formation as any;
+      const newConfig = FORMATIONS[formation as keyof typeof FORMATIONS];
+      if (newConfig) {
+        const newXI: Record<string, Player | null> = {};
+        const unassigned = Object.values(member.startingXI).filter((p): p is Player => p !== null);
+        newConfig.slots.forEach((s) => { newXI[s.id] = null; });
+        unassigned.forEach((p, idx) => {
+          if (newConfig.slots[idx]) newXI[newConfig.slots[idx].id] = p;
+        });
+        member.startingXI = newXI;
+      }
     }
-  }
 
-  if (tactics) {
-    member.tactics = { ...member.tactics, ...tactics };
-  }
+    if (tactics) {
+      member.tactics = { ...member.tactics, ...tactics };
+    }
 
-  room.updatedAt = Date.now();
-  broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
+    room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
 });
 
 // Member Toggle Ready for Battle
 app.post('/api/rooms/ready', (req, res) => {
-  const { code, memberId, ready } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
+  try {
+    const { code, memberId, ready } = req.body || {};
+    const room = findRoomByCode(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
 
-  const member = room.members.find(m => m.id === memberId);
-  if (!member) return res.status(404).json({ error: 'Member not found' });
+    const member = room.members.find(m => m.id === memberId);
+    if (!member) return res.status(404).json({ error: 'Member not found' });
 
-  member.ready = ready !== undefined ? ready : !member.ready;
-  room.updatedAt = Date.now();
+    member.ready = ready !== undefined ? ready : !member.ready;
+    room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
 
-  broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
 });
 
 // Launch Live Head-to-Head Battle or Tournament Match
 app.post('/api/rooms/launch-match', (req, res) => {
-  const { code, memberId } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  if (room.hostId !== memberId) return res.status(403).json({ error: 'Only host can launch match' });
+  try {
+    const { code, memberId } = req.body || {};
+    const room = findRoomByCode(code);
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    if (room.hostId !== memberId) return res.status(403).json({ error: 'Only host can launch match' });
 
-  const home = room.members[0];
-  const away = room.members[1] || room.members[0];
+    const home = room.members[0];
+    const away = room.members[1] || room.members[0];
 
-  // Initialize Live Head-to-Head Match State
-  room.status = 'MATCH';
-  room.h2hMatch = {
-    matchId: `m-${Date.now()}`,
-    homeMemberId: home.id,
-    awayMemberId: away.id,
-    minute: 0,
-    homeScore: 0,
-    awayScore: 0,
-    isFinished: false,
-    events: [
-      {
-        id: `ev-0`,
-        minute: 1,
-        type: 'CHANCE',
-        team: 'home',
-        playerName: 'Referee',
-        description: 'Whistle sounds! Head-to-head battle kicks off under the floodlights.',
-        scoreline: '0 - 0',
+    room.status = 'MATCH';
+    room.h2hMatch = {
+      matchId: `m-${Date.now()}`,
+      homeMemberId: home.id,
+      awayMemberId: away.id,
+      minute: 0,
+      homeScore: 0,
+      awayScore: 0,
+      isFinished: false,
+      events: [
+        {
+          id: `ev-0`,
+          minute: 1,
+          type: 'CHANCE',
+          team: 'home',
+          playerName: 'Referee',
+          description: 'Whistle sounds! Head-to-head battle kicks off under the floodlights.',
+          scoreline: '0 - 0',
+        },
+      ],
+      stats: {
+        possession: [50, 50],
+        shots: [0, 0],
+        shotsOnTarget: [0, 0],
+        tackles: [0, 0],
       },
-    ],
-    stats: {
-      possession: [50, 50],
-      shots: [0, 0],
-      shotsOnTarget: [0, 0],
-      tackles: [0, 0],
-    },
-    winnerId: null,
-  };
+      winnerId: null,
+    };
 
-  room.updatedAt = Date.now();
-  broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-  res.json({ room });
+    room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
 });
 
 // Advance/Simulate Head-to-Head Match Step
 app.post('/api/rooms/step-match', (req, res) => {
-  const { code } = req.body;
-  const room = rooms.get((code || '').toUpperCase());
-  if (!room || !room.h2hMatch || room.h2hMatch.isFinished) {
-    return res.status(400).json({ error: 'Match is not in progress' });
-  }
+  try {
+    const { code } = req.body || {};
+    const room = findRoomByCode(code);
+    if (!room || !room.h2hMatch || room.h2hMatch.isFinished) {
+      return res.status(400).json({ error: 'Match is not in progress' });
+    }
 
   const match = room.h2hMatch;
   const home = room.members.find(m => m.id === match.homeMemberId)!;
@@ -755,8 +866,12 @@ app.post('/api/rooms/step-match', (req, res) => {
   }
 
   room.updatedAt = Date.now();
+  persistRoomsToDisk(rooms);
   broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
   res.json({ room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Server error' });
+  }
 });
 
 // Vite Integration & Server Startup

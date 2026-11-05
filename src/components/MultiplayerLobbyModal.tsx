@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { MultiplayerMode, MultiplayerRoom } from '../types/multiplayer';
 import { addBotApi, createRoomApi, joinRoomApi, startDraftApi, toggleReadyApi } from '../services/multiplayerApi';
+import { initClientP2P } from '../services/p2pSync';
 import { sound } from '../utils/sound';
-import { X, Users, Trophy, Copy, Check, Swords, Shield, Play, Link, UserPlus, Bot, LogOut } from 'lucide-react';
+import { X, Users, Trophy, Copy, Check, Swords, Shield, Play, Link as LinkIcon, UserPlus, Bot, LogOut, ExternalLink, HelpCircle } from 'lucide-react';
 
 interface MultiplayerLobbyModalProps {
   currentRoom: MultiplayerRoom | null;
@@ -38,7 +39,8 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     const roomParam = params.get('room');
     if (roomParam && !currentRoom) {
       setTab('JOIN');
-      setJoinCode(roomParam.trim().toUpperCase());
+      const clean = roomParam.trim().toUpperCase();
+      setJoinCode(clean);
     }
   }, [currentRoom]);
 
@@ -68,15 +70,32 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
   };
 
   const handleJoinRoom = async () => {
-    if (!joinCode.trim()) {
-      setError('Please enter a room code');
+    let clean = joinCode.trim().toUpperCase();
+    if (!clean) {
+      setError('Please enter a room code (e.g. RCL-382)');
       return;
     }
+    // Auto-prefix RCL- if user only entered digits e.g. "382"
+    if (/^\d{3,4}$/.test(clean)) {
+      clean = `RCL-${clean}`;
+    }
+
     setLoading(true);
     setError(null);
     try {
+      // Connect client P2P listener
+      try {
+        initClientP2P(clean, managerName || 'Challenger', clubName || 'Challenger XI', (updated, memId) => {
+          if (updated) {
+            onRoomUpdated(updated, memId || currentMemberId || updated.members[updated.members.length - 1]?.id);
+          }
+        });
+      } catch {
+        // ignore
+      }
+
       const { room, currentMemberId: newId } = await joinRoomApi(
-        joinCode.trim(),
+        clean,
         managerName || 'Challenger',
         clubName || 'Challenger XI'
       );
@@ -84,7 +103,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
       onRoomUpdated(room, newId);
     } catch (err: any) {
       console.error('[RCL Lobby] Join room error:', err);
-      setError(err.message || 'Failed to join room');
+      setError(err.message || 'Failed to join room. Verify the room code and that the host is waiting.');
       sound.playKick();
     } finally {
       setLoading(false);
@@ -137,7 +156,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
 
   const copyInviteLink = () => {
     if (!currentRoom) return;
-    const inviteUrl = `${window.location.origin}?room=${currentRoom.code}`;
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${currentRoom.code}`;
     navigator.clipboard.writeText(inviteUrl);
     setCopiedLink(true);
     sound.playCardSelect();
@@ -172,7 +191,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition"
+            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -219,8 +238,8 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
                   onClick={copyInviteLink}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-white flex items-center gap-2 transition cursor-pointer"
                 >
-                  {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Link className="w-4 h-4 text-amber-400" />}
-                  <span>{copiedLink ? 'Link Copied!' : 'Copy Direct Invite Link'}</span>
+                  {copiedLink ? <Check className="w-4 h-4 text-emerald-400" /> : <LinkIcon className="w-4 h-4 text-amber-400" />}
+                  <span>{copiedLink ? 'Link Copied!' : 'Copy Invite Link'}</span>
                 </button>
                 <button
                   onClick={handleLeaveRoom}
@@ -232,6 +251,33 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
               </div>
             </div>
 
+            {/* Friend Join Instructions Box */}
+            <div className="bg-slate-900/90 border border-slate-700/60 rounded-2xl p-4 text-xs space-y-2">
+              <div className="flex items-center gap-2 text-amber-400 font-bold uppercase tracking-wider text-[11px]">
+                <HelpCircle className="w-4 h-4" />
+                <span>How Your Friend Joins:</span>
+              </div>
+              <ol className="list-decimal list-inside space-y-1 text-slate-300 leading-relaxed">
+                <li>Tell your friend to open <strong>RCL</strong> and click the red <strong>VS FRIENDS</strong> button.</li>
+                <li>Select the <strong>JOIN ROOM</strong> tab.</li>
+                <li>Enter Room Code: <strong className="text-white bg-slate-800 px-2 py-0.5 rounded font-athletic tracking-wider text-sm select-all">{currentRoom.code}</strong> and click <strong>Join Draft Room</strong>!</li>
+              </ol>
+
+              {/* Instant 2nd Tab Link */}
+              <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                <span className="text-[11px] text-slate-400">Want to test 2 players right now?</span>
+                <a
+                  href={`?room=${currentRoom.code}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1 bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-500/40 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Open 2nd Player Window</span>
+                </a>
+              </div>
+            </div>
+
             {/* Connected Members */}
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -239,7 +285,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
                   Connected Managers ({currentRoom.members.length} / {maxCapacity})
                 </span>
                 <span className="text-[11px] text-emerald-400 font-semibold animate-pulse">
-                  ● Real-time sync active
+                  ● Real-time multiplayer sync active
                 </span>
               </div>
 
@@ -481,15 +527,18 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
               <div className="space-y-5">
                 <div>
                   <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block mb-2">
-                    Enter Friend's Room Code
+                    Enter Room Code
                   </label>
                   <input
                     type="text"
                     value={joinCode}
                     onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                    placeholder="e.g. RCL-482 or FINAL2026"
+                    placeholder="e.g. RCL-482 or 482"
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white focus:outline-none focus:border-red-500 font-athletic font-bold uppercase tracking-wider"
                   />
+                  <span className="text-[11px] text-slate-500 mt-1 block">
+                    Enter the code provided by your friend (case insensitive, with or without 'RCL-').
+                  </span>
                 </div>
 
                 <button
@@ -498,7 +547,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
                   className="w-full py-3.5 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-[0_0_20px_rgba(220,38,38,0.5)] cursor-pointer transition flex items-center justify-center gap-2"
                 >
                   <Swords className="w-4 h-4" />
-                  <span>{loading ? 'Joining...' : 'Join Draft Room'}</span>
+                  <span>{loading ? 'Joining Room...' : 'Join Draft Room'}</span>
                 </button>
               </div>
             )}
