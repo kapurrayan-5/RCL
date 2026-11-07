@@ -2,12 +2,45 @@ import { FormationType, Player, TeamTactics } from '../types/game';
 import { LeaderboardEntry, MultiplayerMode, MultiplayerRoom, RoomMember } from '../types/multiplayer';
 import { ALL_CLUBS, getRandomClub } from '../data/clubs';
 import { FORMATIONS } from '../utils/formation';
-import { initHostP2P, broadcastP2P } from './p2pSync';
 
 // Cross-tab broadcast channel for instant multi-window local sync
 const mpChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
   ? new BroadcastChannel('rcl_multiplayer_bus')
   : null;
+
+// Persistent session management for active manager
+export function saveLocalSession(roomCode: string, memberId: string) {
+  try {
+    const clean = roomCode.trim().toUpperCase();
+    localStorage.setItem('rcl_active_room_code', clean);
+    localStorage.setItem('rcl_active_member_id', memberId);
+    sessionStorage.setItem('rcl_active_room_code', clean);
+    sessionStorage.setItem('rcl_active_member_id', memberId);
+  } catch {
+    // ignore
+  }
+}
+
+export function getLocalSession(): { roomCode: string | null; memberId: string | null } {
+  try {
+    const roomCode = sessionStorage.getItem('rcl_active_room_code') || localStorage.getItem('rcl_active_room_code');
+    const memberId = sessionStorage.getItem('rcl_active_member_id') || localStorage.getItem('rcl_active_member_id');
+    return { roomCode, memberId };
+  } catch {
+    return { roomCode: null, memberId: null };
+  }
+}
+
+export function clearLocalSession() {
+  try {
+    localStorage.removeItem('rcl_active_room_code');
+    localStorage.removeItem('rcl_active_member_id');
+    sessionStorage.removeItem('rcl_active_room_code');
+    sessionStorage.removeItem('rcl_active_member_id');
+  } catch {
+    // ignore
+  }
+}
 
 // Local room storage helpers
 export function getLocalRoom(code: string): MultiplayerRoom | null {
@@ -42,8 +75,6 @@ export function saveLocalRoom(room: MultiplayerRoom) {
     if (mpChannel) {
       mpChannel.postMessage({ type: 'ROOM_UPDATE', room });
     }
-    // Also push to P2P network if connected
-    broadcastP2P({ type: 'ROOM_UPDATE', room });
   } catch {
     // ignore
   }
@@ -135,14 +166,7 @@ export async function createRoomApi(
       const data = await res.json();
       if (data?.room) {
         saveLocalRoom(data.room);
-        // Start P2P WebRTC host listener
-        try {
-          initHostP2P(data.room, (updated) => {
-            saveLocalRoom(updated);
-          });
-        } catch {
-          // ignore
-        }
+        saveLocalSession(data.room.code, data.currentMemberId);
         return data;
       }
     } else {
@@ -156,8 +180,9 @@ export async function createRoomApi(
     }
   }
 
-  // Graceful fallback
+  // Graceful fallback for offline mode
   const fallback = createLocalFallbackRoom(hostName, clubName, mode, customCode);
+  saveLocalSession(fallback.room.code, fallback.currentMemberId);
 
   // Sync to server in background
   fetch('/api/rooms/sync', {
@@ -165,14 +190,6 @@ export async function createRoomApi(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ room: fallback.room }),
   }).catch(() => {});
-
-  try {
-    initHostP2P(fallback.room, (updated) => {
-      saveLocalRoom(updated);
-    });
-  } catch {
-    // ignore
-  }
 
   return fallback;
 }
@@ -183,29 +200,47 @@ export async function joinRoomApi(
   clubName: string
 ): Promise<{ room: MultiplayerRoom; currentMemberId: string }> {
   let roomCode = (code || '').trim().toUpperCase();
+  // If user pasted a URL or parameter e.g. "?room=RCL-834", extract code
+  if (roomCode.includes('ROOM=')) {
+    const match = roomCode.match(/ROOM=([A-Z0-9-]+)/i);
+    if (match && match[1]) {
+      roomCode = match[1].trim().toUpperCase();
+    }
+  }
+  roomCode = roomCode.replace(/^[#?]/, '').trim();
+
   // Auto-prefix RCL- if user only entered digits e.g. "382"
   if (/^\d{3,4}$/.test(roomCode)) {
     roomCode = `RCL-${roomCode}`;
   }
+
+  const session = getLocalSession();
+  const existingMemberId = session.memberId && session.roomCode === roomCode ? session.memberId : undefined;
 
   // 1. Authoritative Server Request
   try {
     const res = await fetch('/api/rooms/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: roomCode, memberName, clubName }),
+      body: JSON.stringify({
+        code: roomCode,
+        memberName,
+        clubName,
+        memberId: existingMemberId,
+      }),
     });
 
     if (res.ok) {
       const data = await res.json();
       if (data?.room) {
         saveLocalRoom(data.room);
+        saveLocalSession(data.room.code, data.currentMemberId);
         return data;
       }
     } else {
       const err = await res.json().catch(() => null);
       if (err?.error) {
-        // If server says not found, check if host created it in local storage (e.g. cross-tab on same machine)
+        // If server says not found, check if host created it in local storage (cross-tab on same machine)
         if (err.error.toLowerCase().includes('not found')) {
           const localRoom = getLocalRoom(roomCode);
           if (localRoom) {
@@ -220,12 +255,18 @@ export async function joinRoomApi(
                 const retryRes = await fetch('/api/rooms/join', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ code: roomCode, memberName, clubName }),
+                  body: JSON.stringify({
+                    code: roomCode,
+                    memberName,
+                    clubName,
+                    memberId: existingMemberId,
+                  }),
                 });
                 if (retryRes.ok) {
                   const retryData = await retryRes.json();
                   if (retryData?.room) {
                     saveLocalRoom(retryData.room);
+                    saveLocalSession(retryData.room.code, retryData.currentMemberId);
                     return retryData;
                   }
                 }
@@ -257,6 +298,7 @@ export async function joinRoomApi(
     existing.ready = true;
     localRoom.updatedAt = Date.now();
     saveLocalRoom(localRoom);
+    saveLocalSession(localRoom.code, existing.id);
     return { room: localRoom, currentMemberId: existing.id };
   }
 
@@ -305,6 +347,7 @@ export async function joinRoomApi(
   localRoom.members.push(newMember);
   localRoom.updatedAt = Date.now();
   saveLocalRoom(localRoom);
+  saveLocalSession(localRoom.code, memberId);
 
   // Sync to server
   fetch('/api/rooms/sync', {
@@ -402,7 +445,10 @@ export async function addBotApi(code: string): Promise<MultiplayerRoom> {
 export async function getRoomApi(code: string): Promise<MultiplayerRoom> {
   const roomCode = (code || '').trim().toUpperCase();
   try {
-    const res = await fetch(`/api/rooms/${roomCode}`);
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}?_t=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+    });
     if (res.ok) {
       const data = await res.json();
       if (data?.room) {
@@ -838,7 +884,7 @@ export function subscribeToRoomSocket(
   };
   window.addEventListener('storage', handleStorageEvent);
 
-  // 4. Fast Polling every 800ms (reliable real-time sync across devices and proxies)
+  // 4. Fast Polling every 600ms (reliable real-time sync across devices and proxies)
   pollInterval = setInterval(async () => {
     if (isClosed) return;
     try {
@@ -847,7 +893,7 @@ export function subscribeToRoomSocket(
     } catch {
       // ignore
     }
-  }, 800);
+  }, 600);
 
   // 5. WebSocket connection using explicit /ws path
   function connect() {

@@ -389,6 +389,17 @@ app.post('/api/rooms/join', (req, res) => {
       return res.json({ room, currentMemberId: existingMember.id });
     }
 
+    // 3. In 1v1, if room already has 2 members (e.g. host & challenger), allow Challenger to reconnect seamlessly
+    if (room.mode === '1v1' && room.members.length >= 2) {
+      const challenger = room.members[1];
+      challenger.ready = true;
+      room.updatedAt = Date.now();
+      persistRoomsToDisk(rooms);
+      broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+      console.log(`[RCL Server] Reconnected challenger ${challenger.name} to room ${room.code}`);
+      return res.json({ room, currentMemberId: challenger.id });
+    }
+
     // If cleanName matches host's name, disambiguate so we do NOT overwrite or hijack the host's slot
     if (room.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase())) {
       let counter = 2;
@@ -398,7 +409,7 @@ app.post('/api/rooms/join', (req, res) => {
       cleanName = `${cleanName} (${counter})`;
     }
 
-    // 3. Capacity check
+    // 4. Capacity check
     const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
     if (room.members.length >= maxCapacity) {
       return res.status(400).json({ error: 'This room is already at full capacity.' });
@@ -553,6 +564,9 @@ app.post('/api/rooms/add-bot', (req, res) => {
 // Get Room State
 app.get('/api/rooms/:code', (req, res) => {
   try {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     const room = findRoomByCode(req.params.code);
     if (!room) {
       return res.status(404).json({ error: 'Room not found' });

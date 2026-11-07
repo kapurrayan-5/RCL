@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { MultiplayerMode, MultiplayerRoom } from '../types/multiplayer';
-import { addBotApi, createRoomApi, joinRoomApi, startDraftApi, toggleReadyApi } from '../services/multiplayerApi';
-import { initClientP2P } from '../services/p2pSync';
+import { addBotApi, createRoomApi, joinRoomApi, saveLocalSession, startDraftApi, toggleReadyApi } from '../services/multiplayerApi';
 import { sound } from '../utils/sound';
 import { X, Users, Trophy, Copy, Check, Swords, Shield, Play, Link as LinkIcon, UserPlus, Bot, LogOut, ExternalLink, HelpCircle } from 'lucide-react';
 
@@ -39,7 +38,11 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     const roomParam = params.get('room');
     if (roomParam && !currentRoom) {
       setTab('JOIN');
-      const clean = roomParam.trim().toUpperCase();
+      let clean = roomParam.trim().toUpperCase();
+      if (clean.includes('ROOM=')) {
+        const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
+        if (match && match[1]) clean = match[1].trim().toUpperCase();
+      }
       setJoinCode(clean);
     }
   }, [currentRoom]);
@@ -68,6 +71,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
       );
       sound.playCardSelect();
       setError(null);
+      saveLocalSession(room.code, newId);
       onRoomUpdated(room, newId);
     } catch (err: any) {
       console.error('[RCL Lobby] Create room error:', err);
@@ -84,6 +88,15 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
       setError('Please enter a room code (e.g. RCL-382)');
       return;
     }
+    // If user pasted a URL e.g. "https://.../?room=RCL-834", extract the room parameter
+    if (clean.includes('ROOM=')) {
+      const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
+      if (match && match[1]) {
+        clean = match[1].trim().toUpperCase();
+      }
+    }
+    clean = clean.replace(/^[#?]/, '').trim();
+
     // Auto-prefix RCL- if user only entered digits e.g. "382"
     if (/^\d{3,4}$/.test(clean)) {
       clean = `RCL-${clean}`;
@@ -99,18 +112,8 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
       );
       setError(null);
       sound.playCardSelect();
+      saveLocalSession(room.code, newId);
       onRoomUpdated(room, newId);
-
-      // Connect secondary P2P listener in background for cross-window mesh
-      try {
-        initClientP2P(clean, managerName || 'Challenger', clubName || 'Challenger XI', (updated, memId) => {
-          if (updated) {
-            onRoomUpdated(updated, memId || newId);
-          }
-        });
-      } catch {
-        // ignore
-      }
     } catch (err: any) {
       console.error('[RCL Lobby] Join room error:', err);
       setError(err.message || 'Failed to join room. Verify the room code and that the host is waiting.');

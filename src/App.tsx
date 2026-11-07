@@ -31,7 +31,7 @@ import {
   saveSettings,
   saveTactics,
 } from './utils/storage';
-import { subscribeToRoomSocket } from './services/multiplayerApi';
+import { getLocalSession, getRoomApi, subscribeToRoomSocket } from './services/multiplayerApi';
 
 import { ActiveTab, Navbar } from './components/Navbar';
 import { PreMatchSetup } from './components/PreMatchSetup';
@@ -87,12 +87,46 @@ export default function App() {
   const [multiplayerRoom, setMultiplayerRoom] = useState<MultiplayerRoom | null>(null);
   const [currentMemberId, setCurrentMemberId] = useState<string | null>(null);
 
-  // Check URL for invite code on mount
+  // Check URL or saved session on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
-    if (roomParam) {
-      setIsMultiplayerOpen(true);
+    const session = getLocalSession();
+
+    let targetCode = roomParam ? roomParam.trim().toUpperCase() : session.roomCode;
+    if (targetCode && targetCode.includes('ROOM=')) {
+      const match = targetCode.match(/ROOM=([A-Z0-9-]+)/i);
+      if (match && match[1]) targetCode = match[1].trim().toUpperCase();
+    }
+    if (targetCode) {
+      targetCode = targetCode.replace(/^[#?]/, '').trim();
+      if (/^\d{3,4}$/.test(targetCode)) targetCode = `RCL-${targetCode}`;
+
+      getRoomApi(targetCode).then(room => {
+        if (room) {
+          const userMember = session.memberId ? room.members.find(m => m.id === session.memberId) : null;
+          if (userMember) {
+            setMultiplayerRoom(room);
+            setCurrentMemberId(userMember.id);
+            if (room.status === 'DRAFT') {
+              setIsMultiplayerOpen(false);
+              setActiveTab('MP_DRAFT');
+            } else if (room.status === 'READY_BATTLE') {
+              setIsMultiplayerOpen(false);
+              setActiveTab('MP_COMPARE');
+            } else if (room.status === 'MATCH' || room.status === 'COMPLETED') {
+              setIsMultiplayerOpen(false);
+              setActiveTab('MP_MATCH');
+            } else {
+              setIsMultiplayerOpen(true);
+            }
+          } else {
+            setIsMultiplayerOpen(true);
+          }
+        }
+      }).catch(() => {
+        if (roomParam) setIsMultiplayerOpen(true);
+      });
     }
   }, []);
 
