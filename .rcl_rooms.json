@@ -263,7 +263,7 @@
     "h2hMatch": null,
     "bracket": null,
     "createdAt": 1793854383271,
-    "updatedAt": 1793854432555
+    "updatedAt": 1794064983255
   },
   "RCL-625": {
     "code": "RCL-625",
@@ -866,5 +866,65 @@
     "bracket": null,
     "createdAt": 1794033914876,
     "updatedAt": 1794033914925
+  },
+  "RCL-501": {
+    "code": "RCL-501",
+    "name": "Rayan Host's Room",
+    "mode": "1v1",
+    "status": "LOBBY",
+    "hostId": "usr-czeyabm",
+    "members": [
+      {
+        "id": "usr-czeyabm",
+        "name": "Rayan Host",
+        "clubName": "Dream XI",
+        "avatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces",
+        "isHost": true,
+        "ready": false,
+        "formation": "4-3-3",
+        "tactics": {
+          "buildup": "Direct",
+          "mentality": "Balanced",
+          "defensiveLine": "Medium",
+          "pressing": "Medium",
+          "passing": "Mixed",
+          "width": "Balanced"
+        },
+        "startingXI": {
+          "gk": null,
+          "lb": null,
+          "lcb": null,
+          "rcb": null,
+          "rb": null,
+          "cdm": null,
+          "lcm": null,
+          "rcm": null,
+          "lw": null,
+          "st": null,
+          "rw": null
+        },
+        "analytics": {
+          "overallRating": 0,
+          "scoringRating": 0,
+          "stoppingRating": 0,
+          "teamworkRating": 0,
+          "formationCompatibility": 80,
+          "cardScore": 0,
+          "positionCoverage": 0,
+          "squadDepth": 0
+        },
+        "rerollsLeft": 3,
+        "draftPicksCount": 0,
+        "matchScore": 0
+      }
+    ],
+    "currentTurnMemberId": "usr-czeyabm",
+    "turnIndex": 0,
+    "claimedPlayerIds": [],
+    "activeSquadId": "int-2009-10",
+    "h2hMatch": null,
+    "bracket": null,
+    "createdAt": 1794064983248,
+    "updatedAt": 1794064983248
   }
 }

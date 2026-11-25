@@ -83,6 +83,12 @@ export function recordTournamentCompletion(record: TournamentHistoryRecord) {
   career.cleanSheets += record.cleanSheets;
 
   career.history.unshift(record);
+
+  if (record.recentMatches && record.recentMatches.length > 0) {
+    const existing = career.lastTournamentMatches || [];
+    career.lastTournamentMatches = [...record.recentMatches, ...existing].slice(0, 20);
+  }
+
   saveCareer(career);
 }
 

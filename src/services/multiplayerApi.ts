@@ -67,6 +67,50 @@ export function getLocalRoom(code: string): MultiplayerRoom | null {
   }
 }
 
+// Global Cloud Relay Helper (works cross-device on Vercel, static hosting, and full-stack)
+export async function publishCloudRoom(room: MultiplayerRoom) {
+  try {
+    const cleanCode = (room.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!cleanCode) return;
+    await fetch(`https://ntfy.sh/rcl-room-${cleanCode}`, {
+      method: 'POST',
+      headers: {
+        'Title': 'RCL_ROOM_SYNC',
+        'Tags': 'soccer',
+      },
+      body: JSON.stringify(room),
+    });
+  } catch {
+    // ignore network errors
+  }
+}
+
+export async function fetchCloudRoom(code: string): Promise<MultiplayerRoom | null> {
+  try {
+    const cleanCode = (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!cleanCode) return null;
+    const res = await fetch(`https://ntfy.sh/rcl-room-${cleanCode}/json?poll=1`, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    const lines = text.trim().split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      try {
+        const item = JSON.parse(lines[i]);
+        if (item.event === 'message' && item.message) {
+          const room = typeof item.message === 'string' ? JSON.parse(item.message) : item.message;
+          if (room && room.code && Array.isArray(room.members)) {
+            return room as MultiplayerRoom;
+          }
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
 export function saveLocalRoom(room: MultiplayerRoom) {
   try {
     const code = room.code.trim().toUpperCase();
@@ -75,6 +119,8 @@ export function saveLocalRoom(room: MultiplayerRoom) {
     if (mpChannel) {
       mpChannel.postMessage({ type: 'ROOM_UPDATE', room });
     }
+    // Automatically broadcast state to global cloud relay
+    publishCloudRoom(room);
   } catch {
     // ignore
   }
@@ -238,79 +284,49 @@ export async function joinRoomApi(
         return data;
       }
     } else {
-      const err = await res.json().catch(() => null);
-      if (err?.error) {
-        // If server says not found, check if host created it in local storage (cross-tab on same machine)
-        if (err.error.toLowerCase().includes('not found')) {
-          const localRoom = getLocalRoom(roomCode);
-          if (localRoom) {
-            try {
-              // Sync local room to server and retry join
-              const syncRes = await fetch('/api/rooms/sync', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ room: localRoom }),
-              });
-              if (syncRes.ok) {
-                const retryRes = await fetch('/api/rooms/join', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    code: roomCode,
-                    memberName,
-                    clubName,
-                    memberId: existingMemberId,
-                  }),
-                });
-                if (retryRes.ok) {
-                  const retryData = await retryRes.json();
-                  if (retryData?.room) {
-                    saveLocalRoom(retryData.room);
-                    saveLocalSession(retryData.room.code, retryData.currentMemberId);
-                    return retryData;
-                  }
-                }
-              }
-            } catch {
-              // ignore sync failure
-            }
-          }
-        }
-        throw new Error(err.error);
-      }
+      console.warn('[RCL] Server join room returned non-ok status');
     }
   } catch (err: any) {
-    if (err.message && !err.message.includes('fetch') && !err.message.includes('network')) {
-      throw err;
-    }
     console.warn('[RCL] Server join room endpoint warning:', err);
   }
 
-  // 2. Check local fallback (works across tabs in same browser if server unreachable)
-  const localRoom = getLocalRoom(roomCode);
-  if (!localRoom) {
+  // 2. Global Cloud Relay & Local Storage Check (works across devices on Vercel)
+  let targetRoom = await fetchCloudRoom(roomCode);
+  if (!targetRoom) {
+    targetRoom = getLocalRoom(roomCode);
+  }
+
+  if (!targetRoom) {
     throw new Error(`Room "${roomCode}" not found. Verify the code with the host.`);
   }
 
   const cleanName = (memberName && memberName.trim()) ? memberName.trim() : 'Challenger';
-  const existing = localRoom.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase());
+  const existing = targetRoom.members.find(m => m.id === existingMemberId || m.name.toLowerCase() === cleanName.toLowerCase());
   if (existing) {
     existing.ready = true;
-    localRoom.updatedAt = Date.now();
-    saveLocalRoom(localRoom);
-    saveLocalSession(localRoom.code, existing.id);
-    return { room: localRoom, currentMemberId: existing.id };
+    targetRoom.updatedAt = Date.now();
+    saveLocalRoom(targetRoom);
+    saveLocalSession(targetRoom.code, existing.id);
+    return { room: targetRoom, currentMemberId: existing.id };
   }
 
-  const maxCapacity = localRoom.mode === '1v1' ? 2 : localRoom.mode === 'TOURNAMENT_4' ? 4 : 8;
-  if (localRoom.members.length >= maxCapacity) {
+  const maxCapacity = targetRoom.mode === '1v1' ? 2 : targetRoom.mode === 'TOURNAMENT_4' ? 4 : 8;
+  if (targetRoom.members.length >= maxCapacity) {
+    if (targetRoom.mode === '1v1' && targetRoom.members.length === 2) {
+      const challenger = targetRoom.members[1];
+      challenger.ready = true;
+      targetRoom.updatedAt = Date.now();
+      saveLocalRoom(targetRoom);
+      saveLocalSession(targetRoom.code, challenger.id);
+      return { room: targetRoom, currentMemberId: challenger.id };
+    }
     throw new Error('This room is already at full capacity.');
   }
 
   const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
   const newMember: RoomMember = {
     id: memberId,
-    name: localRoom.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase()) ? `${cleanName} (2)` : cleanName,
+    name: targetRoom.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase()) ? `${cleanName} (2)` : cleanName,
     clubName: clubName || 'Challenger XI',
     avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
     isHost: false,
@@ -344,19 +360,19 @@ export async function joinRoomApi(
     newMember.startingXI[s.id] = null;
   });
 
-  localRoom.members.push(newMember);
-  localRoom.updatedAt = Date.now();
-  saveLocalRoom(localRoom);
-  saveLocalSession(localRoom.code, memberId);
+  targetRoom.members.push(newMember);
+  targetRoom.updatedAt = Date.now();
+  saveLocalRoom(targetRoom);
+  saveLocalSession(targetRoom.code, memberId);
 
-  // Sync to server
+  // Sync to server in background if available
   fetch('/api/rooms/sync', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room: localRoom }),
+    body: JSON.stringify({ room: targetRoom }),
   }).catch(() => {});
 
-  return { room: localRoom, currentMemberId: memberId };
+  return { room: targetRoom, currentMemberId: memberId };
 }
 
 export async function addBotApi(code: string): Promise<MultiplayerRoom> {
@@ -443,7 +459,14 @@ export async function addBotApi(code: string): Promise<MultiplayerRoom> {
 }
 
 export async function getRoomApi(code: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
+  let roomCode = (code || '').trim().toUpperCase();
+  if (roomCode.includes('ROOM=')) {
+    const match = roomCode.match(/ROOM=([A-Z0-9-]+)/i);
+    if (match && match[1]) roomCode = match[1].trim().toUpperCase();
+  }
+  roomCode = roomCode.replace(/^[#?]/, '').trim();
+  if (/^\d{3,4}$/.test(roomCode)) roomCode = `RCL-${roomCode}`;
+
   try {
     const res = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}?_t=${Date.now()}`, {
       cache: 'no-store',
@@ -460,10 +483,19 @@ export async function getRoomApi(code: string): Promise<MultiplayerRoom> {
     // fallback
   }
 
+  // 2. Global Cloud Relay (cross-device across Vercel / phones / PCs)
+  const cloud = await fetchCloudRoom(roomCode);
+  if (cloud) {
+    saveLocalRoom(cloud);
+    return cloud;
+  }
+
+  // 3. Local browser storage
   const local = getLocalRoom(roomCode);
   if (local) return local;
-  throw new Error('Room not found');
+  throw new Error(`Room "${roomCode}" not found. Verify the code with the host.`);
 }
+
 
 export async function startDraftApi(code: string, memberId: string): Promise<MultiplayerRoom> {
   const roomCode = (code || '').trim().toUpperCase();
@@ -802,18 +834,21 @@ export async function getLeaderboardApi(): Promise<LeaderboardEntry[]> {
     const res = await fetch('/api/leaderboard');
     if (res.ok) {
       const data = await res.json();
-      return data.leaderboard || [];
+      if (Array.isArray(data?.leaderboard)) {
+        localStorage.setItem('rcl_leaderboard', JSON.stringify(data.leaderboard));
+        return data.leaderboard;
+      }
     }
   } catch {
     // fallback
   }
 
-  return [
-    { id: 'lb-1', managerName: 'Sir Alex Ferguson', clubName: 'Man United 2008', wins: 54, draws: 8, losses: 6, trophiesWon: 14, highestScore: 92, totalGoals: 168, winRate: 79, rank: 1 },
-    { id: 'lb-2', managerName: 'Pep Guardiola', clubName: 'Barça 2011', wins: 49, draws: 9, losses: 5, trophiesWon: 12, highestScore: 94, totalGoals: 172, winRate: 78, rank: 2 },
-    { id: 'lb-3', managerName: 'Carlo Ancelotti', clubName: 'Real Madrid 2017', wins: 46, draws: 11, losses: 7, trophiesWon: 11, highestScore: 93, totalGoals: 155, winRate: 72, rank: 3 },
-    { id: 'lb-4', managerName: 'Claudio Ranieri', clubName: 'Leicester 2016', wins: 35, draws: 12, losses: 11, trophiesWon: 6, highestScore: 87, totalGoals: 112, winRate: 60, rank: 4 },
-  ];
+  try {
+    const local = localStorage.getItem('rcl_leaderboard');
+    if (local) return JSON.parse(local);
+  } catch {}
+
+  return [];
 }
 
 export async function submitLeaderboardApi(entry: {
@@ -826,6 +861,43 @@ export async function submitLeaderboardApi(entry: {
   highestScore: number;
   totalGoals: number;
 }): Promise<boolean> {
+  // Always update local leaderboard storage for offline / static host resilience
+  try {
+    const raw = localStorage.getItem('rcl_leaderboard');
+    let list: LeaderboardEntry[] = raw ? JSON.parse(raw) : [];
+    const existingIndex = list.findIndex(e => e.managerName.toLowerCase() === entry.managerName.toLowerCase());
+    const totalMatches = entry.wins + entry.draws + entry.losses;
+    const winRate = totalMatches > 0 ? Math.round((entry.wins / totalMatches) * 100) : 0;
+    if (existingIndex >= 0) {
+      list[existingIndex] = {
+        ...list[existingIndex],
+        clubName: entry.clubName,
+        wins: Math.max(list[existingIndex].wins, entry.wins),
+        draws: Math.max(list[existingIndex].draws, entry.draws),
+        losses: Math.max(list[existingIndex].losses, entry.losses),
+        trophiesWon: Math.max(list[existingIndex].trophiesWon, entry.trophiesWon),
+        highestScore: Math.max(list[existingIndex].highestScore, entry.highestScore),
+        totalGoals: Math.max(list[existingIndex].totalGoals, entry.totalGoals),
+        winRate: Math.max(list[existingIndex].winRate, winRate),
+      };
+    } else {
+      list.push({
+        id: `usr-${Date.now()}`,
+        managerName: entry.managerName,
+        clubName: entry.clubName,
+        wins: entry.wins,
+        draws: entry.draws,
+        losses: entry.losses,
+        trophiesWon: entry.trophiesWon,
+        highestScore: entry.highestScore,
+        totalGoals: entry.totalGoals,
+        winRate,
+        isCurrentUser: true,
+      });
+    }
+    localStorage.setItem('rcl_leaderboard', JSON.stringify(list));
+  } catch {}
+
   try {
     const res = await fetch('/api/leaderboard/submit', {
       method: 'POST',
@@ -837,6 +909,7 @@ export async function submitLeaderboardApi(entry: {
     return false;
   }
 }
+
 
 // WebSocket Connection Helper with Auto-Reconnect, BroadcastChannel & Polling Fallback
 export function subscribeToRoomSocket(
@@ -936,12 +1009,36 @@ export function subscribeToRoomSocket(
     }
   }
 
+  // 6. Global Cloud Relay EventSource (instant cross-device sync across Vercel and all hosts)
+  let eventSource: EventSource | null = null;
+  const cleanCode = roomCode.replace(/[^A-Z0-9]/g, '');
+  if (typeof window !== 'undefined' && 'EventSource' in window) {
+    try {
+      eventSource = new EventSource(`https://ntfy.sh/rcl-room-${cleanCode}/sse`);
+      eventSource.onmessage = (event) => {
+        if (isClosed) return;
+        try {
+          const item = JSON.parse(event.data);
+          if (item.event === 'message' && item.message) {
+            const cloudRoom = typeof item.message === 'string' ? JSON.parse(item.message) : item.message;
+            if (cloudRoom && cloudRoom.code && Array.isArray(cloudRoom.members)) {
+              saveLocalRoom(cloudRoom);
+              onUpdate(cloudRoom);
+            }
+          }
+        } catch {}
+      };
+    } catch {}
+  }
+
   connect();
+
 
   return () => {
     isClosed = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (pollInterval) clearInterval(pollInterval);
+    if (eventSource) eventSource.close();
     mpChannel?.removeEventListener('message', handleBcMessage);
     window.removeEventListener('storage', handleStorageEvent);
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -949,3 +1046,4 @@ export function subscribeToRoomSocket(
     }
   };
 }
+

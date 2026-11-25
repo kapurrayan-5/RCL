@@ -31,7 +31,7 @@ import {
   saveSettings,
   saveTactics,
 } from './utils/storage';
-import { getLocalSession, getRoomApi, subscribeToRoomSocket } from './services/multiplayerApi';
+import { getLocalSession, getRoomApi, subscribeToRoomSocket, submitLeaderboardApi } from './services/multiplayerApi';
 
 import { ActiveTab, Navbar } from './components/Navbar';
 import { PreMatchSetup } from './components/PreMatchSetup';
@@ -262,6 +262,18 @@ export default function App() {
     // Update career stats
     recordTournamentCompletion(summary);
     setCareer(loadCareer());
+
+    // Submit real player record to leaderboard
+    submitLeaderboardApi({
+      managerName: career.managerName,
+      clubName: career.clubName,
+      wins: summary.wins,
+      draws: summary.draws,
+      losses: summary.losses,
+      trophiesWon: summary.finish === 'CHAMPION' ? 1 : 0,
+      highestScore: summary.bestPlayer?.rating || 82,
+      totalGoals: summary.goalsScored,
+    }).catch(() => {});
   };
 
   // Play Again from Solo Summary

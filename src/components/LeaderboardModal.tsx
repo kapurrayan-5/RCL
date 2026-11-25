@@ -111,18 +111,29 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
 
         {/* Leaderboard Table */}
         <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
-          {sortedEntries.map((entry, idx) => {
-            const isTop1 = idx === 0;
-            const isTop2 = idx === 1;
-            const isTop3 = idx === 2;
-            const isMe = entry.managerName.toLowerCase() === currentManagerName.toLowerCase() || entry.isCurrentUser;
+          {sortedEntries.length === 0 ? (
+            <div className="text-center py-12 px-4 rounded-2xl bg-slate-900/40 border border-slate-800 space-y-3">
+              <div className="w-12 h-12 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400">
+                <Trophy className="w-6 h-6" />
+              </div>
+              <h4 className="font-athletic font-bold text-lg text-white">No Managers Ranked Yet</h4>
+              <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                Win your first RCL Cup tournament campaign or compete in an online 1v1 multiplayer battle to claim the #1 spot on the global leaderboard!
+              </p>
+            </div>
+          ) : (
+            sortedEntries.map((entry, idx) => {
+              const isTop1 = idx === 0;
+              const isTop2 = idx === 1;
+              const isTop3 = idx === 2;
+              const isMe = entry.managerName.toLowerCase() === currentManagerName.toLowerCase() || entry.isCurrentUser;
 
-            return (
-              <div
-                key={entry.id}
-                className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between ${
-                  isMe
-                    ? 'bg-amber-500/15 border-amber-400/80 shadow-[0_0_20px_rgba(245,158,11,0.2)]'
+              return (
+                <div
+                  key={entry.id}
+                  className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between ${
+                    isMe
+                      ? 'bg-amber-500/15 border-amber-400/80 shadow-[0_0_20px_rgba(245,158,11,0.2)]'
                     : isTop1
                     ? 'bg-amber-950/30 border-amber-500/50'
                     : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700'
@@ -186,8 +197,9 @@ export const LeaderboardModal: React.FC<LeaderboardModalProps> = ({
                 </div>
               </div>
             );
-          })}
-        </div>
+          })
+        )}
+      </div>
       </div>
     </div>
   );

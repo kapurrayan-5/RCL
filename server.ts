@@ -95,17 +95,30 @@ function findRoomByCode(rawCode: string): MultiplayerRoom | undefined {
   return undefined;
 }
 
-// Seed Global Leaderboard with Legendary & Cult Managers
-let globalLeaderboard: LeaderboardEntry[] = [
-  { id: 'lb-1', managerName: 'Sir Alex Ferguson', clubName: 'Man United 2008', wins: 54, draws: 8, losses: 6, trophiesWon: 14, highestScore: 92, totalGoals: 168, winRate: 79 },
-  { id: 'lb-2', managerName: 'Pep Guardiola', clubName: 'Barça 2011', wins: 49, draws: 9, losses: 5, trophiesWon: 12, highestScore: 94, totalGoals: 172, winRate: 78 },
-  { id: 'lb-3', managerName: 'Carlo Ancelotti', clubName: 'Real Madrid 2017', wins: 46, draws: 11, losses: 7, trophiesWon: 11, highestScore: 93, totalGoals: 155, winRate: 72 },
-  { id: 'lb-4', managerName: 'José Mourinho', clubName: 'Chelsea 2005', wins: 42, draws: 14, losses: 4, trophiesWon: 9, highestScore: 89, totalGoals: 128, winRate: 70 },
-  { id: 'lb-5', managerName: 'Zinedine Zidane', clubName: 'Real Madrid 2018', wins: 38, draws: 10, losses: 8, trophiesWon: 8, highestScore: 91, totalGoals: 135, winRate: 68 },
-  { id: 'lb-6', managerName: 'Claudio Ranieri', clubName: 'Leicester 2016', wins: 35, draws: 12, losses: 11, trophiesWon: 6, highestScore: 87, totalGoals: 112, winRate: 60 },
-  { id: 'lb-7', managerName: 'Jürgen Klopp', clubName: 'Liverpool 2019', wins: 33, draws: 8, losses: 10, trophiesWon: 5, highestScore: 90, totalGoals: 124, winRate: 65 },
-  { id: 'lb-8', managerName: 'Bobby Robson', clubName: 'Newcastle 2003', wins: 29, draws: 10, losses: 14, trophiesWon: 4, highestScore: 88, totalGoals: 104, winRate: 55 },
-];
+// Real Global Leaderboard with disk persistence (no fake managers)
+const LEADERBOARD_FILE = path.resolve(__dirname, '.rcl_leaderboard.json');
+
+function loadLeaderboardFromDisk(): LeaderboardEntry[] {
+  try {
+    if (fs.existsSync(LEADERBOARD_FILE)) {
+      const data = JSON.parse(fs.readFileSync(LEADERBOARD_FILE, 'utf-8'));
+      if (Array.isArray(data)) return data;
+    }
+  } catch (err) {
+    console.error('Failed to load leaderboard from disk:', err);
+  }
+  return [];
+}
+
+function persistLeaderboardToDisk(list: LeaderboardEntry[]) {
+  try {
+    fs.writeFileSync(LEADERBOARD_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to persist leaderboard to disk:', err);
+  }
+}
+
+let globalLeaderboard: LeaderboardEntry[] = loadLeaderboardFromDisk();
 
 function broadcastToRoom(code: string, payload: any) {
   const message = JSON.stringify(payload);
@@ -203,6 +216,7 @@ app.post('/api/leaderboard/submit', (req, res) => {
     });
   }
 
+  persistLeaderboardToDisk(globalLeaderboard);
   res.json({ success: true });
 });
 

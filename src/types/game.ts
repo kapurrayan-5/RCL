@@ -218,6 +218,23 @@ export interface TournamentState {
   runnerUpTeam?: MatchTeamInfo;
 }
 
+export interface TournamentMatchRecord {
+  id: string;
+  stageName: string; // e.g. "The Grand Final", "Semi-Final", "Group Stage - MD 3"
+  opponentName: string;
+  opponentShortName?: string;
+  opponentClubId?: string;
+  opponentRating?: number;
+  userScore: number;
+  opponentScore: number;
+  isWin: boolean;
+  isDraw: boolean;
+  wentToPenalties?: boolean;
+  penaltiesScore?: string;
+  date: string;
+  topScorerName?: string;
+}
+
 export interface TournamentHistoryRecord {
   id: string;
   date: string;
@@ -234,6 +251,7 @@ export interface TournamentHistoryRecord {
   topScorer: { name: string; goals: number };
   topAssister: { name: string; assists: number };
   bestPlayer: { name: string; rating: number };
+  recentMatches?: TournamentMatchRecord[];
 }
 
 export interface ManagerCareer {
@@ -250,4 +268,5 @@ export interface ManagerCareer {
   totalGoalsConceded: number;
   cleanSheets: number;
   history: TournamentHistoryRecord[];
+  lastTournamentMatches?: TournamentMatchRecord[];
 }

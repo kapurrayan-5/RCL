@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { KnockoutMatch, MatchSimulationResult, MatchTeamInfo, SimulationPacing, TournamentGroup, TournamentState } from '../types/game';
+import { KnockoutMatch, MatchSimulationResult, MatchTeamInfo, SimulationPacing, TournamentGroup, TournamentHistoryRecord, TournamentMatchRecord, TournamentState } from '../types/game';
 import { simulateMatch } from '../utils/simulation';
 import { sound } from '../utils/sound';
 import { Play, Pause, FastForward, SkipForward, Trophy, Swords, Calendar, CheckCircle2, Shield, Flame } from 'lucide-react';
@@ -7,7 +7,7 @@ import { Play, Pause, FastForward, SkipForward, Trophy, Swords, Calendar, CheckC
 interface LiveCupViewProps {
   tournament: TournamentState;
   onUpdateTournament: (tournament: TournamentState) => void;
-  onCampaignComplete: (finish: any, groups: any[], knockoutMatches: KnockoutMatch[]) => void;
+  onCampaignComplete: (summary: TournamentHistoryRecord) => void;
   userTeam: MatchTeamInfo;
 }
 
@@ -22,6 +22,7 @@ export const LiveCupView: React.FC<LiveCupViewProps> = ({
   const [speed, setSpeed] = useState<'slow' | 'normal' | 'fast' | 'ultra'>('normal');
   const [isSimulatingLive, setIsSimulatingLive] = useState<boolean>(false);
   const [activeSimulationResult, setActiveSimulationResult] = useState<MatchSimulationResult | null>(null);
+  const [playedUserMatches, setPlayedUserMatches] = useState<TournamentMatchRecord[]>([]);
 
   // Live minute counter for active match simulation
   const [liveMinute, setLiveMinute] = useState<number>(0);
@@ -116,12 +117,77 @@ export const LiveCupView: React.FC<LiveCupViewProps> = ({
     return () => clearInterval(timer);
   }, [isSimulatingLive, activeSimulationResult, liveMinute, speed]);
 
+  // Helper to construct complete TournamentHistoryRecord with match records
+  const finishCampaign = (finish: TournamentHistoryRecord['finish'], allMatches: TournamentMatchRecord[]) => {
+    const goalsScored = allMatches.reduce((acc, m) => acc + m.userScore, 0);
+    const goalsConceded = allMatches.reduce((acc, m) => acc + m.opponentScore, 0);
+    const wins = allMatches.filter(m => m.isWin).length;
+    const draws = allMatches.filter(m => m.isDraw).length;
+    const losses = allMatches.filter(m => !m.isWin && !m.isDraw).length;
+    const cleanSheets = allMatches.filter(m => m.opponentScore === 0).length;
+
+    const summary: TournamentHistoryRecord = {
+      id: `record-${Date.now()}`,
+      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      format: '32-Team RCL Cup',
+      squadName: userTeam.name || 'RCL Dream XI',
+      finish,
+      matchesPlayed: allMatches.length,
+      wins,
+      draws,
+      losses,
+      goalsScored,
+      goalsConceded,
+      cleanSheets,
+      topScorer: userTeam.lineup[0]
+        ? { name: userTeam.lineup[0].shortName, goals: Math.max(1, Math.round(goalsScored * 0.4)) }
+        : { name: 'Striker', goals: Math.max(1, goalsScored) },
+      topAssister: userTeam.lineup[1]
+        ? { name: userTeam.lineup[1].shortName, assists: Math.max(1, Math.round(goalsScored * 0.3)) }
+        : { name: 'Midfielder', assists: 1 },
+      bestPlayer: userTeam.lineup[0]
+        ? { name: userTeam.lineup[0].shortName, rating: userTeam.lineup[0].overall }
+        : { name: 'Captain', rating: 88 },
+      recentMatches: allMatches,
+    };
+
+    onCampaignComplete(summary);
+  };
+
   // Handle post-match resolution and tournament progression
   const handleConcludeMatch = () => {
     if (!activeSimulationResult) return;
     const result = activeSimulationResult;
     setIsSimulatingLive(false);
     setActiveSimulationResult(null);
+
+    const isUserHome = result.homeTeam.id === userTeamId;
+    const oppTeam = isUserHome ? result.awayTeam : result.homeTeam;
+    const userScored = isUserHome ? result.homeScore : result.awayScore;
+    const oppScored = isUserHome ? result.awayScore : result.homeScore;
+    const isUserWin = result.winnerId === userTeamId || (userScored > oppScored);
+    const isMatchDraw = userScored === oppScored && !result.wentToPenalties;
+
+    const currentMatchLog: TournamentMatchRecord = {
+      id: `tmatch-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      stageName: nextUserMatchInfo ? nextUserMatchInfo.stageTitle : (tournament.currentStage === 'group_stage' ? `Group Stage - MD ${tournament.currentMatchday}` : 'Knockout Match'),
+      opponentName: oppTeam.name,
+      opponentShortName: oppTeam.shortName,
+      opponentClubId: oppTeam.id,
+      opponentRating: oppTeam.rating,
+      userScore: userScored,
+      opponentScore: oppScored,
+      isWin: isUserWin,
+      isDraw: isMatchDraw,
+      wentToPenalties: result.wentToPenalties,
+      penaltiesScore: result.wentToPenalties
+        ? `${isUserHome ? result.homePenalties : result.awayPenalties}-${isUserHome ? result.awayPenalties : result.homePenalties} pens`
+        : undefined,
+      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+    };
+
+    const nextMatches = [...playedUserMatches, currentMatchLog];
+    setPlayedUserMatches(nextMatches);
 
     if (tournament.currentStage === 'group_stage') {
       let updatedGroups = tournament.groups.map(group => {
@@ -211,7 +277,7 @@ export const LiveCupView: React.FC<LiveCupViewProps> = ({
         const userRank = userGroup ? userGroup.teams.findIndex(t => t.team.id === userTeamId) : 3;
 
         if (userRank > 1) {
-          onCampaignComplete('GROUP STAGE EXIT', updatedGroups, []);
+          finishCampaign('GROUP STAGE EXIT', nextMatches);
         } else {
           // Build R16
           const r16Matches: KnockoutMatch[] = [
@@ -236,18 +302,18 @@ export const LiveCupView: React.FC<LiveCupViewProps> = ({
 
       const userWon = result.winnerId === userTeamId;
       if (!userWon) {
-        const exitMap: Record<string, any> = {
+        const exitMap: Record<string, TournamentHistoryRecord['finish']> = {
           round_of_16: 'ROUND OF 16 EXIT',
           quarter_finals: 'QUARTER-FINALIST',
           semi_finals: 'SEMI-FINALIST',
           final: 'RUNNER-UP',
         };
-        onCampaignComplete(exitMap[tournament.currentStage] || 'ROUND OF 16 EXIT', tournament.groups, updatedMatches);
+        finishCampaign(exitMap[tournament.currentStage] || 'ROUND OF 16 EXIT', nextMatches);
         return;
       }
 
       if (tournament.currentStage === 'final') {
-        onCampaignComplete('CHAMPION', tournament.groups, updatedMatches);
+        finishCampaign('CHAMPION', nextMatches);
         return;
       }
 
