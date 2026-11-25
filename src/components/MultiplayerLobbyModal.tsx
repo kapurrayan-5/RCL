@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { MultiplayerMode, MultiplayerRoom } from '../types/multiplayer';
-import { addBotApi, createRoomApi, joinRoomApi, saveLocalSession, startDraftApi, toggleReadyApi } from '../services/multiplayerApi';
+import {
+  addBotApi,
+  createRoomApi,
+  joinRoomApi,
+  normalizeRoomCode,
+  saveLocalSession,
+  startDraftApi,
+  toggleReadyApi,
+} from '../services/multiplayerApi';
 import { sound } from '../utils/sound';
 import { X, Users, Trophy, Copy, Check, Swords, Shield, Play, Link as LinkIcon, UserPlus, Bot, LogOut, ExternalLink, HelpCircle } from 'lucide-react';
 
@@ -10,6 +18,7 @@ interface MultiplayerLobbyModalProps {
   managerName: string;
   clubName: string;
   onRoomUpdated: (room: MultiplayerRoom, memberId: string) => void;
+  onLeaveRoom: () => Promise<void> | void;
   onClose: () => void;
   onStartDraft: () => void;
 }
@@ -20,10 +29,11 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
   managerName,
   clubName,
   onRoomUpdated,
+  onLeaveRoom,
   onClose,
   onStartDraft,
 }) => {
-  const [tab, setTab] = useState<'HOST' | 'JOIN'>(currentRoom ? 'HOST' : 'HOST');
+  const [tab, setTab] = useState<'HOST' | 'JOIN'>('HOST');
   const [mode, setMode] = useState<MultiplayerMode>('1v1');
   const [customCode, setCustomCode] = useState('');
   const [joinCode, setJoinCode] = useState('');
@@ -38,12 +48,7 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     const roomParam = params.get('room');
     if (roomParam && !currentRoom) {
       setTab('JOIN');
-      let clean = roomParam.trim().toUpperCase();
-      if (clean.includes('ROOM=')) {
-        const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
-        if (match && match[1]) clean = match[1].trim().toUpperCase();
-      }
-      setJoinCode(clean);
+      setJoinCode(normalizeRoomCode(roomParam));
     }
   }, [currentRoom]);
 
@@ -83,23 +88,10 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
   };
 
   const handleJoinRoom = async () => {
-    let clean = joinCode.trim().toUpperCase();
+    const clean = normalizeRoomCode(joinCode);
     if (!clean) {
       setError('Please enter a room code (e.g. RCL-382)');
       return;
-    }
-    // If user pasted a URL e.g. "https://.../?room=RCL-834", extract the room parameter
-    if (clean.includes('ROOM=')) {
-      const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
-      if (match && match[1]) {
-        clean = match[1].trim().toUpperCase();
-      }
-    }
-    clean = clean.replace(/^[#?]/, '').trim();
-
-    // Auto-prefix RCL- if user only entered digits e.g. "382"
-    if (/^\d{3,4}$/.test(clean)) {
-      clean = `RCL-${clean}`;
     }
 
     setLoading(true);
@@ -162,9 +154,11 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
     }
   };
 
-  const handleLeaveRoom = () => {
+  const handleLeaveRoom = async () => {
     sound.playCardSelect();
-    window.location.href = window.location.pathname;
+    setError(null);
+    setTab('HOST');
+    await onLeaveRoom();
   };
 
   const copyInviteLink = () => {
@@ -256,10 +250,11 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
                 </button>
                 <button
                   onClick={handleLeaveRoom}
-                  className="p-2 bg-slate-800/80 hover:bg-red-950 text-slate-400 hover:text-red-300 rounded-xl border border-slate-700 transition cursor-pointer"
+                  className="px-3 py-2 bg-slate-800/80 hover:bg-red-950 text-slate-300 hover:text-red-300 rounded-xl border border-slate-700 hover:border-red-500/50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
                   title="Leave Room"
                 >
                   <LogOut className="w-4 h-4" />
+                  <span>Leave Room</span>
                 </button>
               </div>
             </div>
@@ -396,18 +391,47 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
               </span>
             </div>
 
+            {/* Auto-Start Readiness Banner */}
+            <div
+              className={`rounded-xl p-3 text-xs flex items-center justify-between gap-3 border ${
+                currentRoom.members.length >= maxCapacity
+                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                  : 'bg-slate-900/70 border-slate-800 text-slate-300'
+              }`}
+            >
+              <span>
+                {currentRoom.members.length < maxCapacity
+                  ? `Waiting for ${maxCapacity - currentRoom.members.length} more player${maxCapacity - currentRoom.members.length > 1 ? 's' : ''} to connect (${currentRoom.members.length}/${maxCapacity})...`
+                  : 'All players connected! Click "Mark Ready" — the match draft launches automatically once everyone is ready.'}
+              </span>
+              <span className="font-athletic font-bold text-xs shrink-0 text-amber-300">
+                {currentRoom.members.filter(m => m.ready).length}/{maxCapacity} Ready
+              </span>
+            </div>
+
             {/* Action Bar */}
-            <div className="flex items-center justify-between pt-2 border-t border-slate-800">
-              <button
-                onClick={handleToggleReady}
-                className={`px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-wider transition cursor-pointer ${
-                  currentMember?.ready
-                    ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg'
-                }`}
-              >
-                {currentMember?.ready ? 'Cancel Ready' : 'Mark Ready'}
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleToggleReady}
+                  className={`px-5 py-3 rounded-xl font-bold text-xs uppercase tracking-wider transition cursor-pointer ${
+                    currentMember?.ready
+                      ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      : currentRoom.members.length >= 2 && currentRoom.members.some(m => m.id !== currentMemberId && m.ready)
+                      ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-[0_0_20px_rgba(16,185,129,0.6)] animate-pulse'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg'
+                  }`}
+                >
+                  {currentMember?.ready ? 'Cancel Ready' : 'Mark Ready'}
+                </button>
+                <button
+                  onClick={handleLeaveRoom}
+                  className="px-4 py-3 bg-slate-900 hover:bg-red-950/80 text-slate-300 hover:text-red-300 border border-slate-700 hover:border-red-500/50 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Leave</span>
+                </button>
+              </div>
 
               {isHost ? (
                 <button
@@ -420,7 +444,9 @@ export const MultiplayerLobbyModal: React.FC<MultiplayerLobbyModalProps> = ({
                 </button>
               ) : (
                 <div className="text-xs text-slate-400 italic">
-                  Waiting for host to start draft...
+                  {currentMember?.ready
+                    ? 'Ready! Waiting for other players to ready up...'
+                    : 'Click Mark Ready to start when all players are connected'}
                 </div>
               )}
             </div>

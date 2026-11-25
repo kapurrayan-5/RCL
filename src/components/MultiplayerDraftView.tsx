@@ -5,13 +5,14 @@ import { ALL_CLUBS } from '../data/clubs';
 import { FORMATIONS, getPositionalCompatibility } from '../utils/formation';
 import { draftPickApi, rerollSquadApi } from '../services/multiplayerApi';
 import { sound } from '../utils/sound';
-import { Sparkles, Trophy, Shield, Target, Users, RefreshCw, CheckCircle, Lock, AlertCircle, Swords, ArrowRight, Dices } from 'lucide-react';
+import { Sparkles, Trophy, Shield, Target, Users, RefreshCw, CheckCircle, Lock, AlertCircle, Swords, ArrowRight, Dices, LogOut } from 'lucide-react';
 
 interface MultiplayerDraftViewProps {
   room: MultiplayerRoom;
   currentMemberId: string;
   onRoomUpdated: (room: MultiplayerRoom) => void;
   onAdvanceToComparison: () => void;
+  onLeaveRoom?: () => void;
 }
 
 export const MultiplayerDraftView: React.FC<MultiplayerDraftViewProps> = ({
@@ -19,6 +20,7 @@ export const MultiplayerDraftView: React.FC<MultiplayerDraftViewProps> = ({
   currentMemberId,
   onRoomUpdated,
   onAdvanceToComparison,
+  onLeaveRoom,
 }) => {
   const currentMember = room.members.find(m => m.id === currentMemberId) || room.members[0];
   const opponentMember = room.members.find(m => m.id !== currentMemberId) || room.members[1] || room.members[0];
@@ -163,6 +165,17 @@ export const MultiplayerDraftView: React.FC<MultiplayerDraftViewProps> = ({
             <div className="text-[10px] text-slate-400 uppercase font-semibold">Turn Index</div>
             <div className="font-athletic font-bold text-sm text-white">#{room.turnIndex + 1}</div>
           </div>
+
+          {onLeaveRoom && (
+            <button
+              onClick={onLeaveRoom}
+              className="px-3 py-2 bg-slate-800/80 hover:bg-red-950 text-slate-300 hover:text-red-300 rounded-xl border border-slate-700 hover:border-red-500/50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              title="Leave Room"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Leave Room</span>
+            </button>
+          )}
         </div>
       </div>
 

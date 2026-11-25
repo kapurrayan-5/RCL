@@ -3,7 +3,7 @@ import { MultiplayerRoom } from '../types/multiplayer';
 import { stepMatchApi, submitLeaderboardApi } from '../services/multiplayerApi';
 import { sound } from '../utils/sound';
 import confetti from 'canvas-confetti';
-import { Trophy, Swords, Shield, Target, Play, FastForward, CheckCircle, RotateCcw, Award } from 'lucide-react';
+import { Trophy, Swords, Shield, Target, Play, FastForward, CheckCircle, RotateCcw, Award, LogOut } from 'lucide-react';
 
 interface H2HMatchViewProps {
   room: MultiplayerRoom;
@@ -11,6 +11,7 @@ interface H2HMatchViewProps {
   onRoomUpdated: (room: MultiplayerRoom) => void;
   onReturnToLobby: () => void;
   onOpenLeaderboard: () => void;
+  onLeaveRoom?: () => void;
 }
 
 export const H2HMatchView: React.FC<H2HMatchViewProps> = ({
@@ -19,6 +20,7 @@ export const H2HMatchView: React.FC<H2HMatchViewProps> = ({
   onRoomUpdated,
   onReturnToLobby,
   onOpenLeaderboard,
+  onLeaveRoom,
 }) => {
   const match = room.h2hMatch;
   const isHost = room.hostId === currentMemberId;
@@ -124,12 +126,25 @@ export const H2HMatchView: React.FC<H2HMatchViewProps> = ({
             <span className="text-xs text-slate-400">Room: {room.code}</span>
           </div>
 
-          {/* Clock */}
-          <div className="flex items-center gap-2 bg-black/60 px-4 py-1.5 rounded-full border border-slate-700">
-            <div className={`w-2.5 h-2.5 rounded-full ${match.isFinished ? 'bg-amber-400' : 'bg-emerald-400 animate-ping'}`} />
-            <span className="font-athletic font-black text-xl text-white tracking-widest tabular-nums">
-              {match.isFinished ? 'FULL TIME' : `${match.minute}'`}
-            </span>
+          {/* Clock & Leave */}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 bg-black/60 px-4 py-1.5 rounded-full border border-slate-700">
+              <div className={`w-2.5 h-2.5 rounded-full ${match.isFinished ? 'bg-amber-400' : 'bg-emerald-400 animate-ping'}`} />
+              <span className="font-athletic font-black text-xl text-white tracking-widest tabular-nums">
+                {match.isFinished ? 'FULL TIME' : `${match.minute}'`}
+              </span>
+            </div>
+
+            {onLeaveRoom && (
+              <button
+                onClick={onLeaveRoom}
+                className="px-3 py-2 bg-slate-800/80 hover:bg-red-950 text-slate-300 hover:text-red-300 rounded-xl border border-slate-700 hover:border-red-500/50 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+                title="Leave Room"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Leave Room</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -231,6 +246,16 @@ export const H2HMatchView: React.FC<H2HMatchViewProps> = ({
               <RotateCcw className="w-4 h-4" />
               <span>Rematch / Return to Lobby</span>
             </button>
+
+            {onLeaveRoom && (
+              <button
+                onClick={onLeaveRoom}
+                className="px-6 py-3 bg-slate-900 hover:bg-red-950 text-slate-300 hover:text-red-300 font-bold text-xs uppercase tracking-wider rounded-xl border border-slate-700 hover:border-red-500/50 flex items-center gap-2 cursor-pointer transition"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Leave Room</span>
+              </button>
+            )}
           </div>
         </div>
       )}

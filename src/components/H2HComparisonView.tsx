@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { MultiplayerRoom, RoomMember } from '../types/multiplayer';
 import { launchMatchApi } from '../services/multiplayerApi';
 import { sound } from '../utils/sound';
-import { Swords, Trophy, Shield, Target, Users, Play, Sparkles, Flame, CheckCircle, ArrowLeft } from 'lucide-react';
+import { Swords, Trophy, Shield, Target, Users, Play, Sparkles, Flame, CheckCircle, ArrowLeft, LogOut } from 'lucide-react';
 import { Player } from '../types/game';
 
 interface H2HComparisonViewProps {
@@ -11,6 +11,7 @@ interface H2HComparisonViewProps {
   onRoomUpdated: (room: MultiplayerRoom) => void;
   onLaunchMatch: () => void;
   onBackToDraft: () => void;
+  onLeaveRoom?: () => void;
 }
 
 export const H2HComparisonView: React.FC<H2HComparisonViewProps> = ({
@@ -19,6 +20,7 @@ export const H2HComparisonView: React.FC<H2HComparisonViewProps> = ({
   onRoomUpdated,
   onLaunchMatch,
   onBackToDraft,
+  onLeaveRoom,
 }) => {
   const currentMember = room.members.find(m => m.id === currentMemberId) || room.members[0];
   const opponentMember = room.members.find(m => m.id !== currentMemberId) || room.members[1] || room.members[0];
@@ -225,14 +227,26 @@ export const H2HComparisonView: React.FC<H2HComparisonViewProps> = ({
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={onBackToDraft}
-          className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs uppercase tracking-wider rounded-xl flex items-center gap-2 transition"
-        >
-          <ArrowLeft className="w-4 h-4" />
-          <span>Back to Draft Pitch</span>
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onBackToDraft}
+            className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs uppercase tracking-wider rounded-xl flex items-center gap-2 transition cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Back to Draft Pitch</span>
+          </button>
+
+          {onLeaveRoom && (
+            <button
+              onClick={onLeaveRoom}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-red-950 text-slate-300 hover:text-red-300 border border-slate-700 hover:border-red-500/50 font-bold text-xs uppercase tracking-wider rounded-xl flex items-center gap-2 transition cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Leave Room</span>
+            </button>
+          )}
+        </div>
 
         {isHost ? (
           <button

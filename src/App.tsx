@@ -31,7 +31,15 @@ import {
   saveSettings,
   saveTactics,
 } from './utils/storage';
-import { getLocalSession, getRoomApi, subscribeToRoomSocket, submitLeaderboardApi } from './services/multiplayerApi';
+import {
+  clearLocalSession,
+  getLocalSession,
+  getRoomApi,
+  leaveRoomApi,
+  normalizeRoomCode,
+  subscribeToRoomSocket,
+  submitLeaderboardApi,
+} from './services/multiplayerApi';
 
 import { ActiveTab, Navbar } from './components/Navbar';
 import { PreMatchSetup } from './components/PreMatchSetup';
@@ -87,21 +95,30 @@ export default function App() {
   const [multiplayerRoom, setMultiplayerRoom] = useState<MultiplayerRoom | null>(null);
   const [currentMemberId, setCurrentMemberId] = useState<string | null>(null);
 
+  // Cleanly leave active multiplayer room
+  const handleLeaveMultiplayerRoom = async () => {
+    const code = multiplayerRoom?.code;
+    const memId = currentMemberId;
+    clearLocalSession();
+    if (window.location.search.includes('room=')) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    setMultiplayerRoom(null);
+    setCurrentMemberId(null);
+    setActiveTab(prev => (prev.startsWith('MP_') ? 'SETUP' : prev));
+    if (code) {
+      await leaveRoomApi(code, memId).catch(() => {});
+    }
+  };
+
   // Check URL or saved session on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
     const session = getLocalSession();
 
-    let targetCode = roomParam ? roomParam.trim().toUpperCase() : session.roomCode;
-    if (targetCode && targetCode.includes('ROOM=')) {
-      const match = targetCode.match(/ROOM=([A-Z0-9-]+)/i);
-      if (match && match[1]) targetCode = match[1].trim().toUpperCase();
-    }
+    const targetCode = normalizeRoomCode(roomParam || session.roomCode || '');
     if (targetCode) {
-      targetCode = targetCode.replace(/^[#?]/, '').trim();
-      if (/^\d{3,4}$/.test(targetCode)) targetCode = `RCL-${targetCode}`;
-
       getRoomApi(targetCode).then(room => {
         if (room) {
           const userMember = session.memberId ? room.members.find(m => m.id === session.memberId) : null;
@@ -121,10 +138,12 @@ export default function App() {
               setIsMultiplayerOpen(true);
             }
           } else {
-            setIsMultiplayerOpen(true);
+            if (!roomParam) clearLocalSession();
+            if (roomParam) setIsMultiplayerOpen(true);
           }
         }
       }).catch(() => {
+        if (!roomParam) clearLocalSession();
         if (roomParam) setIsMultiplayerOpen(true);
       });
     }
@@ -139,21 +158,43 @@ export default function App() {
   useEffect(() => {
     if (!multiplayerRoom?.code || !currentMemberId) return;
 
-    const cleanup = subscribeToRoomSocket(multiplayerRoom.code, currentMemberId, (updatedRoom) => {
-      setMultiplayerRoom(updatedRoom);
-
-      // Auto-transition UI when room progresses
-      if (updatedRoom.status === 'DRAFT') {
-        setIsMultiplayerOpen(false);
-        setActiveTab('MP_DRAFT');
-      } else if (updatedRoom.status === 'READY_BATTLE') {
-        setIsMultiplayerOpen(false);
-        setActiveTab('MP_COMPARE');
-      } else if (updatedRoom.status === 'MATCH' || updatedRoom.status === 'COMPLETED') {
-        setIsMultiplayerOpen(false);
-        setActiveTab('MP_MATCH');
+    const handleRoomClosed = () => {
+      clearLocalSession();
+      if (window.location.search.includes('room=')) {
+        window.history.replaceState({}, '', window.location.pathname);
       }
-    });
+      setMultiplayerRoom(null);
+      setCurrentMemberId(null);
+      setIsMultiplayerOpen(false);
+      setActiveTab(prev => (prev.startsWith('MP_') ? 'SETUP' : prev));
+    };
+
+    const cleanup = subscribeToRoomSocket(
+      multiplayerRoom.code,
+      currentMemberId,
+      (updatedRoom) => {
+        const stillInRoom = updatedRoom.members.some(m => m.id === currentMemberId);
+        if (!stillInRoom) {
+          handleRoomClosed();
+          return;
+        }
+
+        setMultiplayerRoom(updatedRoom);
+
+        // Auto-transition UI when room progresses
+        if (updatedRoom.status === 'DRAFT') {
+          setIsMultiplayerOpen(false);
+          setActiveTab('MP_DRAFT');
+        } else if (updatedRoom.status === 'READY_BATTLE') {
+          setIsMultiplayerOpen(false);
+          setActiveTab('MP_COMPARE');
+        } else if (updatedRoom.status === 'MATCH' || updatedRoom.status === 'COMPLETED') {
+          setIsMultiplayerOpen(false);
+          setActiveTab('MP_MATCH');
+        }
+      },
+      handleRoomClosed
+    );
 
     return cleanup;
   }, [multiplayerRoom?.code, currentMemberId]);
@@ -385,6 +426,7 @@ export default function App() {
             currentMemberId={currentMemberId}
             onRoomUpdated={setMultiplayerRoom}
             onAdvanceToComparison={() => setActiveTab('MP_COMPARE')}
+            onLeaveRoom={handleLeaveMultiplayerRoom}
           />
         )}
 
@@ -396,6 +438,7 @@ export default function App() {
             onRoomUpdated={setMultiplayerRoom}
             onLaunchMatch={() => setActiveTab('MP_MATCH')}
             onBackToDraft={() => setActiveTab('MP_DRAFT')}
+            onLeaveRoom={handleLeaveMultiplayerRoom}
           />
         )}
 
@@ -410,6 +453,7 @@ export default function App() {
               setActiveTab('SETUP');
             }}
             onOpenLeaderboard={() => setIsLeaderboardOpen(true)}
+            onLeaveRoom={handleLeaveMultiplayerRoom}
           />
         )}
       </main>
@@ -425,6 +469,7 @@ export default function App() {
             setMultiplayerRoom(room);
             setCurrentMemberId(memberId);
           }}
+          onLeaveRoom={handleLeaveMultiplayerRoom}
           onClose={() => setIsMultiplayerOpen(false)}
           onStartDraft={() => {
             setIsMultiplayerOpen(false);

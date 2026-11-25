@@ -66,10 +66,26 @@ function persistRoomsToDisk(map: Map<string, MultiplayerRoom>) {
 const rooms = loadRoomsFromDisk();
 const clientRooms = new Map<WebSocket, { roomCode: string; memberId: string }>();
 
+// Normalize user-entered room codes (handles URLs, #/? prefixes, 3-4 digit suffixes)
+function normalizeRoomInput(rawCode: string): string {
+  let clean = (rawCode || '').trim().toUpperCase();
+  if (clean.includes('ROOM=')) {
+    const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
+    if (match && match[1]) {
+      clean = match[1].trim().toUpperCase();
+    }
+  }
+  clean = clean.replace(/^[#?]/, '').trim();
+  if (/^\d{3,4}$/.test(clean)) {
+    clean = `RCL-${clean}`;
+  }
+  return clean;
+}
+
 // Find room by code with smart normalization (handles RCL-123, rcl-123, 123, spaces, etc.)
 function findRoomByCode(rawCode: string): MultiplayerRoom | undefined {
   if (!rawCode) return undefined;
-  const upper = rawCode.trim().toUpperCase();
+  const upper = normalizeRoomInput(rawCode);
   if (rooms.has(upper)) return rooms.get(upper);
 
   const clean = upper.replace(/[^A-Z0-9]/g, '');
@@ -77,7 +93,6 @@ function findRoomByCode(rawCode: string): MultiplayerRoom | undefined {
     if (key.replace(/[^A-Z0-9]/g, '') === clean) {
       return room;
     }
-    // Match suffix if user only entered digits e.g. "482"
     if (clean.length >= 3 && key.endsWith(clean)) {
       return room;
     }
@@ -93,6 +108,22 @@ function findRoomByCode(rawCode: string): MultiplayerRoom | undefined {
   }
 
   return undefined;
+}
+
+// Auto-start draft when required players are connected and all are ready
+function maybeAutoStartDraft(room: MultiplayerRoom): boolean {
+  if (room.status !== 'LOBBY') return false;
+  const requiredCount = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+  if (room.members.length >= requiredCount && room.members.every(m => m.ready)) {
+    room.status = 'DRAFT';
+    room.currentTurnMemberId = room.members[0].id;
+    room.turnIndex = 0;
+    room.claimedPlayerIds = [];
+    room.activeSquadId = getRandomClub().id;
+    room.updatedAt = Date.now();
+    return true;
+  }
+  return false;
 }
 
 // Real Global Leaderboard with disk persistence (no fake managers)
@@ -150,7 +181,7 @@ wss.on('connection', (ws: WebSocket) => {
       const msg = JSON.parse(data.toString());
       if (msg.type === 'SUBSCRIBE_ROOM') {
         const { roomCode, memberId } = msg;
-        const normCode = (roomCode || '').toUpperCase().trim();
+        const normCode = normalizeRoomInput(roomCode);
         clientRooms.set(ws, { roomCode: normCode, memberId });
         const room = findRoomByCode(normCode);
         if (room) {
@@ -170,6 +201,10 @@ wss.on('connection', (ws: WebSocket) => {
 });
 
 // REST Endpoints
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
 app.get('/api/leaderboard', (_req, res) => {
   const sorted = [...globalLeaderboard].sort((a, b) => b.trophiesWon - a.trophiesWon || b.wins - a.wins);
   const ranked = sorted.map((entry, index) => ({ ...entry, rank: index + 1 }));
@@ -291,14 +326,32 @@ function performBotTurn(room: MultiplayerRoom) {
 app.post('/api/rooms/create', (req, res) => {
   try {
     const { hostName, clubName, mode, customCode } = req.body || {};
-    let code = (customCode && customCode.trim() ? customCode.trim().toUpperCase() : `RCL-${Math.floor(100 + Math.random() * 900)}`).replace(/[^A-Z0-9-]/g, '').slice(0, 10);
+    const hasCustom = Boolean(customCode && customCode.trim());
+    let code = hasCustom
+      ? normalizeRoomInput(customCode).replace(/[^A-Z0-9-]/g, '').slice(0, 12)
+      : `RCL-${Math.floor(100 + Math.random() * 900)}`;
     if (!code) code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
 
-    // Ensure uniqueness
-    let attempts = 0;
-    while (rooms.has(code) && attempts < 10) {
-      code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
-      attempts++;
+    if (hasCustom && rooms.has(code)) {
+      const existing = rooms.get(code)!;
+      const isStale =
+        existing.status === 'COMPLETED' ||
+        existing.members.length === 0 ||
+        Date.now() - (existing.updatedAt || existing.createdAt) > 2 * 60 * 60 * 1000;
+      if (!isStale) {
+        return res.status(409).json({
+          error: `Room code "${code}" is currently active. Choose another code or join it.`,
+        });
+      }
+      rooms.delete(code);
+    }
+
+    if (!hasCustom) {
+      let attempts = 0;
+      while (rooms.has(code) && attempts < 25) {
+        code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
+        attempts++;
+      }
     }
 
     const initialClub = getRandomClub();
@@ -371,18 +424,18 @@ app.post('/api/rooms/create', (req, res) => {
 app.post('/api/rooms/join', (req, res) => {
   try {
     const { code, memberName, clubName, memberId: requestedMemberId } = req.body || {};
-    const room = findRoomByCode(code);
+    const normalizedCode = normalizeRoomInput(code);
+    const room = findRoomByCode(normalizedCode);
 
     if (!room) {
       console.warn(`[RCL Server] Join failed: room not found for input "${code}"`);
-      return res.status(404).json({ error: `Room "${code}" not found. Please verify the room code.` });
+      return res.status(404).json({ error: `Room "${normalizedCode || code}" not found. Please verify the room code.` });
     }
 
     // 1. Check if user is reconnecting by existing member ID
     if (requestedMemberId) {
       const existingById = room.members.find(m => m.id === requestedMemberId);
       if (existingById) {
-        existingById.ready = true;
         room.updatedAt = Date.now();
         persistRoomsToDisk(rooms);
         broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
@@ -390,12 +443,11 @@ app.post('/api/rooms/join', (req, res) => {
       }
     }
 
-    let cleanName = (memberName && memberName.trim()) ? memberName.trim() : `Challenger`;
+    let cleanName = (memberName && memberName.trim()) ? memberName.trim() : 'Challenger';
 
-    // 2. Check if a non-host member with the exact same name is already in the room reconnecting
-    const existingMember = room.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase());
-    if (existingMember && !existingMember.isHost) {
-      existingMember.ready = true;
+    // 2. Check if a non-host member with the exact same name is reconnecting
+    const existingMember = room.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase() && !m.isHost);
+    if (existingMember) {
       room.updatedAt = Date.now();
       persistRoomsToDisk(rooms);
       broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
@@ -403,15 +455,14 @@ app.post('/api/rooms/join', (req, res) => {
       return res.json({ room, currentMemberId: existingMember.id });
     }
 
-    // 3. In 1v1, if room already has 2 members (e.g. host & challenger), allow Challenger to reconnect seamlessly
-    if (room.mode === '1v1' && room.members.length >= 2) {
-      const challenger = room.members[1];
-      challenger.ready = true;
-      room.updatedAt = Date.now();
-      persistRoomsToDisk(rooms);
-      broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
-      console.log(`[RCL Server] Reconnected challenger ${challenger.name} to room ${room.code}`);
-      return res.json({ room, currentMemberId: challenger.id });
+    // 3. Capacity check
+    const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+    if (room.members.length >= maxCapacity) {
+      return res.status(400).json({ error: 'This room is already at full capacity.' });
+    }
+
+    if (room.status !== 'LOBBY') {
+      return res.status(400).json({ error: 'The match or draft has already started in this room.' });
     }
 
     // If cleanName matches host's name, disambiguate so we do NOT overwrite or hijack the host's slot
@@ -423,24 +474,14 @@ app.post('/api/rooms/join', (req, res) => {
       cleanName = `${cleanName} (${counter})`;
     }
 
-    // 4. Capacity check
-    const maxCapacity = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
-    if (room.members.length >= maxCapacity) {
-      return res.status(400).json({ error: 'This room is already at full capacity.' });
-    }
-
-    if (room.status !== 'LOBBY') {
-      return res.status(400).json({ error: 'The match or draft has already started in this room.' });
-    }
-
     const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
     const newMember: RoomMember = {
       id: memberId,
       name: cleanName,
-      clubName: (clubName && clubName.trim()) ? clubName.trim() : `Challenger XI`,
+      clubName: (clubName && clubName.trim()) ? clubName.trim() : 'Challenger XI',
       avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
       isHost: false,
-      ready: true,
+      ready: false,
       formation: '4-3-3',
       tactics: {
         buildup: 'Direct',
@@ -480,6 +521,57 @@ app.post('/api/rooms/join', (req, res) => {
   } catch (err: any) {
     console.error('[RCL Server] Error joining room:', err);
     res.status(500).json({ error: err.message || 'Failed to join room' });
+  }
+});
+
+// Leave Room
+app.post('/api/rooms/leave', (req, res) => {
+  try {
+    const { code, memberId } = req.body || {};
+    const room = findRoomByCode(code);
+    if (!room) {
+      return res.json({ success: true, closed: true });
+    }
+
+    if (memberId) {
+      room.members = room.members.filter(m => m.id !== memberId);
+    }
+
+    const humanMembers = room.members.filter(m => !m.isBot);
+    if (room.members.length === 0 || humanMembers.length === 0) {
+      rooms.delete(room.code.toUpperCase());
+      persistRoomsToDisk(rooms);
+      broadcastToRoom(room.code, { type: 'ROOM_CLOSED', code: room.code });
+      console.log(`[RCL Server] Room ${room.code} closed (empty)`);
+      return res.json({ success: true, closed: true });
+    }
+
+    // Reassign host if host left
+    if (room.hostId === memberId || !room.members.some(m => m.id === room.hostId)) {
+      const nextHost = humanMembers[0] || room.members[0];
+      room.hostId = nextHost.id;
+      room.members.forEach(m => {
+        m.isHost = m.id === nextHost.id;
+      });
+    }
+
+    if (room.currentTurnMemberId === memberId) {
+      room.currentTurnMemberId = room.members[0].id;
+    }
+
+    // If drafting and down to 1 member, return to lobby
+    if (room.status === 'DRAFT' && room.members.length < 2) {
+      room.status = 'LOBBY';
+    }
+
+    room.updatedAt = Date.now();
+    persistRoomsToDisk(rooms);
+    broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
+    console.log(`[RCL Server] Member ${memberId} left room ${room.code}`);
+    res.json({ success: true, room });
+  } catch (err: any) {
+    console.error('[RCL Server] Error leaving room:', err);
+    res.status(500).json({ error: err.message || 'Failed to leave room' });
   }
 });
 
@@ -564,6 +656,7 @@ app.post('/api/rooms/add-bot', (req, res) => {
 
     room.members.push(botMember);
     room.updatedAt = Date.now();
+    maybeAutoStartDraft(room);
     persistRoomsToDisk(rooms);
 
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });
@@ -746,7 +839,7 @@ app.post('/api/rooms/update-tactics', (req, res) => {
   }
 });
 
-// Member Toggle Ready for Battle
+// Member Toggle Ready for Battle (auto-starts draft when all connected players are ready)
 app.post('/api/rooms/ready', (req, res) => {
   try {
     const { code, memberId, ready } = req.body || {};
@@ -758,6 +851,7 @@ app.post('/api/rooms/ready', (req, res) => {
 
     member.ready = ready !== undefined ? ready : !member.ready;
     room.updatedAt = Date.now();
+    maybeAutoStartDraft(room);
     persistRoomsToDisk(rooms);
 
     broadcastToRoom(room.code, { type: 'ROOM_UPDATE', room });

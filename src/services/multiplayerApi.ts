@@ -1,21 +1,39 @@
+import Peer, { DataConnection } from 'peerjs';
 import { FormationType, Player, TeamTactics } from '../types/game';
 import { LeaderboardEntry, MultiplayerMode, MultiplayerRoom, RoomMember } from '../types/multiplayer';
 import { ALL_CLUBS, getRandomClub } from '../data/clubs';
 import { FORMATIONS } from '../utils/formation';
 
-// Cross-tab broadcast channel for instant multi-window local sync
+// Cross-tab broadcast channel for instant same-browser multi-tab sync
 const mpChannel = typeof window !== 'undefined' && 'BroadcastChannel' in window
   ? new BroadcastChannel('rcl_multiplayer_bus')
   : null;
 
-// Persistent session management for active manager
+export function normalizeRoomCode(rawCode: string): string {
+  let clean = (rawCode || '').trim().toUpperCase();
+  if (clean.includes('ROOM=')) {
+    const match = clean.match(/ROOM=([A-Z0-9-]+)/i);
+    if (match && match[1]) {
+      clean = match[1].trim().toUpperCase();
+    }
+  }
+  clean = clean.replace(/^[#?]/, '').trim();
+  if (/^\d{3,4}$/.test(clean)) {
+    clean = `RCL-${clean}`;
+  }
+  return clean;
+}
+
+// Per-tab persistent session management (uses sessionStorage so opening a 2nd tab never hijacks Host's ID)
 export function saveLocalSession(roomCode: string, memberId: string) {
   try {
-    const clean = roomCode.trim().toUpperCase();
-    localStorage.setItem('rcl_active_room_code', clean);
-    localStorage.setItem('rcl_active_member_id', memberId);
+    if (typeof window === 'undefined') return;
+    const clean = normalizeRoomCode(roomCode);
     sessionStorage.setItem('rcl_active_room_code', clean);
     sessionStorage.setItem('rcl_active_member_id', memberId);
+    // Clean any legacy cross-tab localStorage session keys
+    localStorage.removeItem('rcl_active_room_code');
+    localStorage.removeItem('rcl_active_member_id');
   } catch {
     // ignore
   }
@@ -23,8 +41,9 @@ export function saveLocalSession(roomCode: string, memberId: string) {
 
 export function getLocalSession(): { roomCode: string | null; memberId: string | null } {
   try {
-    const roomCode = sessionStorage.getItem('rcl_active_room_code') || localStorage.getItem('rcl_active_room_code');
-    const memberId = sessionStorage.getItem('rcl_active_member_id') || localStorage.getItem('rcl_active_member_id');
+    if (typeof window === 'undefined') return { roomCode: null, memberId: null };
+    const roomCode = sessionStorage.getItem('rcl_active_room_code');
+    const memberId = sessionStorage.getItem('rcl_active_member_id');
     return { roomCode, memberId };
   } catch {
     return { roomCode: null, memberId: null };
@@ -33,23 +52,54 @@ export function getLocalSession(): { roomCode: string | null; memberId: string |
 
 export function clearLocalSession() {
   try {
-    localStorage.removeItem('rcl_active_room_code');
-    localStorage.removeItem('rcl_active_member_id');
+    if (typeof window === 'undefined') return;
     sessionStorage.removeItem('rcl_active_room_code');
     sessionStorage.removeItem('rcl_active_member_id');
+    localStorage.removeItem('rcl_active_room_code');
+    localStorage.removeItem('rcl_active_member_id');
+    localStorage.removeItem('rcl_last_active_room');
   } catch {
     // ignore
   }
 }
 
-// Local room storage helpers
+// Backend availability detection (true on AI Studio / Node full-stack, false on static-only hosts like Vercel)
+let backendAvailableCache: boolean | null = null;
+let backendCheckedAt = 0;
+
+async function isBackendAvailable(): Promise<boolean> {
+  if (typeof window === 'undefined') return true;
+  if (backendAvailableCache !== null && Date.now() - backendCheckedAt < 15000) {
+    return backendAvailableCache;
+  }
+  try {
+    const res = await fetch(`/api/health?_t=${Date.now()}`, {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = await res.json();
+      backendAvailableCache = Boolean(data?.ok);
+      backendCheckedAt = Date.now();
+      return backendAvailableCache;
+    }
+  } catch {
+    // static or offline
+  }
+  backendAvailableCache = false;
+  backendCheckedAt = Date.now();
+  return false;
+}
+
+// Local room storage helpers (for static/offline fallback)
 export function getLocalRoom(code: string): MultiplayerRoom | null {
   try {
-    const clean = code.trim().toUpperCase();
+    if (typeof window === 'undefined') return null;
+    const clean = normalizeRoomCode(code);
     const raw = localStorage.getItem(`rcl_room_${clean}`);
     if (raw) return JSON.parse(raw);
 
-    // Try without prefix/hyphen
     const stripped = clean.replace(/[^A-Z0-9]/g, '');
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -67,72 +117,435 @@ export function getLocalRoom(code: string): MultiplayerRoom | null {
   }
 }
 
-// Global Cloud Relay Helper (works cross-device on Vercel, static hosting, and full-stack)
-export async function publishCloudRoom(room: MultiplayerRoom) {
+export function saveLocalRoom(room: MultiplayerRoom, broadcastLocally = true) {
   try {
-    const cleanCode = (room.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (!cleanCode) return;
-    await fetch(`https://ntfy.sh/rcl-room-${cleanCode}`, {
-      method: 'POST',
-      headers: {
-        'Title': 'RCL_ROOM_SYNC',
-        'Tags': 'soccer',
-      },
-      body: JSON.stringify(room),
-    });
-  } catch {
-    // ignore network errors
-  }
-}
-
-export async function fetchCloudRoom(code: string): Promise<MultiplayerRoom | null> {
-  try {
-    const cleanCode = (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (!cleanCode) return null;
-    const res = await fetch(`https://ntfy.sh/rcl-room-${cleanCode}/json?poll=1`, {
-      cache: 'no-store',
-      headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    const lines = text.trim().split('\n').filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const item = JSON.parse(lines[i]);
-        if (item.event === 'message' && item.message) {
-          const room = typeof item.message === 'string' ? JSON.parse(item.message) : item.message;
-          if (room && room.code && Array.isArray(room.members)) {
-            return room as MultiplayerRoom;
-          }
-        }
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-export function saveLocalRoom(room: MultiplayerRoom) {
-  try {
-    const code = room.code.trim().toUpperCase();
+    if (typeof window === 'undefined') return;
+    const code = normalizeRoomCode(room.code);
     localStorage.setItem(`rcl_room_${code}`, JSON.stringify(room));
-    localStorage.setItem('rcl_last_active_room', code);
-    if (mpChannel) {
+    if (broadcastLocally && mpChannel) {
       mpChannel.postMessage({ type: 'ROOM_UPDATE', room });
     }
-    // Automatically broadcast state to global cloud relay
-    publishCloudRoom(room);
   } catch {
     // ignore
   }
 }
 
-function createLocalFallbackRoom(
+export function deleteLocalRoom(code: string) {
+  try {
+    if (typeof window === 'undefined') return;
+    const clean = normalizeRoomCode(code);
+    localStorage.removeItem(`rcl_room_${clean}`);
+    if (mpChannel) {
+      mpChannel.postMessage({ type: 'ROOM_CLOSED', code: clean });
+    }
+  } catch {
+    // ignore
+  }
+}
+
+// Helper: auto-start draft when required players are connected and all are ready
+function maybeAutoStartDraftLocal(room: MultiplayerRoom): boolean {
+  if (room.status !== 'LOBBY') return false;
+  const requiredCount = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+  if (room.members.length >= requiredCount && room.members.every(m => m.ready)) {
+    room.status = 'DRAFT';
+    room.currentTurnMemberId = room.members[0].id;
+    room.turnIndex = 0;
+    room.claimedPlayerIds = [];
+    room.activeSquadId = getRandomClub().id;
+    room.updatedAt = Date.now();
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
+// PeerJS Host-Authoritative Mesh (ONLY used when static host has no /api)
+// ============================================================================
+let activeHostPeer: Peer | null = null;
+let activeHostRoomCode: string | null = null;
+const activeHostConns = new Set<DataConnection>();
+
+let activeClientPeer: Peer | null = null;
+let activeClientConn: DataConnection | null = null;
+let activeClientRoomCode: string | null = null;
+const peerUpdateListeners = new Set<(room: MultiplayerRoom) => void>();
+const peerCloseListeners = new Set<(code: string) => void>();
+
+function peerIdForRoom(code: string): string {
+  const clean = normalizeRoomCode(code).replace(/[^A-Z0-9]/g, '');
+  return `rcl-room-v3-${clean}`;
+}
+
+function broadcastToPeerClients(room: MultiplayerRoom) {
+  const msg = { type: 'ROOM_UPDATE', room };
+  activeHostConns.forEach(conn => {
+    if (conn.open) {
+      try {
+        conn.send(msg);
+      } catch {
+        // ignore
+      }
+    }
+  });
+}
+
+function applyRoomMutationLocal(room: MultiplayerRoom, action: any): { room: MultiplayerRoom | null; closed?: boolean; memberId?: string; error?: string } {
+  if (action.type === 'JOIN') {
+    const cleanName = (action.memberName && action.memberName.trim()) ? action.memberName.trim() : 'Challenger';
+    if (action.memberId) {
+      const existingById = room.members.find(m => m.id === action.memberId);
+      if (existingById) {
+        return { room, memberId: existingById.id };
+      }
+    }
+    const existingByName = room.members.find(m => m.name.toLowerCase() === cleanName.toLowerCase() && !m.isHost);
+    if (existingByName) {
+      return { room, memberId: existingByName.id };
+    }
+    const maxCap = room.mode === '1v1' ? 2 : room.mode === 'TOURNAMENT_4' ? 4 : 8;
+    if (room.members.length >= maxCap) {
+      return { room, error: 'This room is already at full capacity.' };
+    }
+    if (room.status !== 'LOBBY') {
+      return { room, error: 'The match or draft has already started in this room.' };
+    }
+
+    let finalName = cleanName;
+    if (room.members.some(m => m.name.toLowerCase() === finalName.toLowerCase())) {
+      let c = 2;
+      while (room.members.some(m => m.name.toLowerCase() === `${finalName} (${c})`.toLowerCase())) c++;
+      finalName = `${finalName} (${c})`;
+    }
+
+    const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
+    const newMember: RoomMember = {
+      id: memberId,
+      name: finalName,
+      clubName: action.clubName || 'Challenger XI',
+      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
+      isHost: false,
+      ready: false,
+      formation: '4-3-3',
+      tactics: {
+        buildup: 'Direct',
+        mentality: 'Balanced',
+        defensiveLine: 'Medium',
+        pressing: 'Medium',
+        passing: 'Mixed',
+        width: 'Balanced',
+      },
+      startingXI: {},
+      analytics: {
+        overallRating: 0,
+        scoringRating: 0,
+        stoppingRating: 0,
+        teamworkRating: 0,
+        formationCompatibility: 80,
+        cardScore: 0,
+        positionCoverage: 0,
+        squadDepth: 0,
+      },
+      rerollsLeft: 3,
+      draftPicksCount: 0,
+      matchScore: 0,
+    };
+    FORMATIONS['4-3-3'].slots.forEach(s => { newMember.startingXI[s.id] = null; });
+    room.members.push(newMember);
+    room.updatedAt = Date.now();
+    return { room, memberId };
+  }
+
+  if (action.type === 'TOGGLE_READY') {
+    const m = room.members.find(x => x.id === action.memberId);
+    if (!m) return { room, error: 'Member not found' };
+    m.ready = action.ready !== undefined ? action.ready : !m.ready;
+    room.updatedAt = Date.now();
+    maybeAutoStartDraftLocal(room);
+    return { room };
+  }
+
+  if (action.type === 'START_DRAFT') {
+    if (room.hostId !== action.memberId) return { room, error: 'Only host can start draft' };
+    room.status = 'DRAFT';
+    room.currentTurnMemberId = room.members[0].id;
+    room.turnIndex = 0;
+    room.claimedPlayerIds = [];
+    room.activeSquadId = getRandomClub().id;
+    room.updatedAt = Date.now();
+    return { room };
+  }
+
+  if (action.type === 'DRAFT_PICK') {
+    if (room.status !== 'DRAFT') return { room, error: 'Room is not drafting' };
+    if (room.claimedPlayerIds.includes(action.playerId)) return { room, error: 'Player already claimed' };
+    const member = room.members.find(m => m.id === action.memberId);
+    if (!member) return { room, error: 'Member not found' };
+    const club = ALL_CLUBS.find(c => c.id === room.activeSquadId) || ALL_CLUBS[0];
+    const player = club.roster.find(p => p.id === action.playerId) || ALL_CLUBS.flatMap(c => c.roster).find(p => p.id === action.playerId);
+    if (!player) return { room, error: 'Player not found' };
+
+    member.startingXI[action.slotId] = player;
+    member.draftPicksCount = Object.values(member.startingXI).filter(Boolean).length;
+    room.claimedPlayerIds.push(player.id);
+    const players = Object.values(member.startingXI).filter((p): p is Player => p !== null);
+    member.analytics.overallRating = players.length > 0 ? Math.round(players.reduce((a, b) => a + b.overall, 0) / players.length) : 60;
+
+    const currentIdx = room.members.findIndex(m => m.id === action.memberId);
+    const nextIdx = (currentIdx + 1) % room.members.length;
+    room.currentTurnMemberId = room.members[nextIdx].id;
+    room.turnIndex += 1;
+    room.activeSquadId = getRandomClub([room.activeSquadId]).id;
+
+    if (room.members.every(m => Object.values(m.startingXI).filter(Boolean).length >= 11)) {
+      room.status = 'READY_BATTLE';
+    }
+    room.updatedAt = Date.now();
+    return { room };
+  }
+
+  if (action.type === 'REROLL') {
+    const member = room.members.find(m => m.id === action.memberId);
+    if (!member || member.rerollsLeft <= 0) return { room, error: 'No rerolls left' };
+    member.rerollsLeft -= 1;
+    room.activeSquadId = getRandomClub([room.activeSquadId]).id;
+    room.updatedAt = Date.now();
+    return { room };
+  }
+
+  if (action.type === 'UPDATE_TACTICS') {
+    const member = room.members.find(m => m.id === action.memberId);
+    if (member) {
+      if (action.formation) member.formation = action.formation;
+      if (action.tactics) member.tactics = { ...member.tactics, ...action.tactics };
+      room.updatedAt = Date.now();
+    }
+    return { room };
+  }
+
+  if (action.type === 'LAUNCH_MATCH') {
+    const home = room.members[0];
+    const away = room.members[1] || room.members[0];
+    room.status = 'MATCH';
+    room.h2hMatch = {
+      matchId: `m-${Date.now()}`,
+      homeMemberId: home.id,
+      awayMemberId: away.id,
+      minute: 0,
+      homeScore: 0,
+      awayScore: 0,
+      isFinished: false,
+      events: [{
+        id: 'ev-0',
+        minute: 1,
+        type: 'CHANCE',
+        team: 'home',
+        playerName: 'Referee',
+        description: 'Whistle blows! 1v1 battle kicks off.',
+        scoreline: '0 - 0',
+      }],
+      stats: { possession: [50, 50], shots: [0, 0], shotsOnTarget: [0, 0], tackles: [0, 0] },
+      winnerId: null,
+    };
+    room.updatedAt = Date.now();
+    return { room };
+  }
+
+  if (action.type === 'LEAVE') {
+    room.members = room.members.filter(m => m.id !== action.memberId);
+    const humans = room.members.filter(m => !m.isBot);
+    if (room.members.length === 0 || humans.length === 0) {
+      return { room: null, closed: true };
+    }
+    if (room.hostId === action.memberId || !room.members.some(m => m.id === room.hostId)) {
+      const nextHost = humans[0] || room.members[0];
+      room.hostId = nextHost.id;
+      room.members.forEach(m => { m.isHost = m.id === nextHost.id; });
+    }
+    if (room.currentTurnMemberId === action.memberId) {
+      room.currentTurnMemberId = room.members[0].id;
+    }
+    if (room.status === 'DRAFT' && room.members.length < 2) {
+      room.status = 'LOBBY';
+    }
+    room.updatedAt = Date.now();
+    return { room };
+  }
+
+  return { room };
+}
+
+function startStaticHostPeer(roomCode: string) {
+  if (typeof window === 'undefined') return;
+  const norm = normalizeRoomCode(roomCode);
+  if (activeHostPeer && activeHostRoomCode === norm && !activeHostPeer.destroyed) return;
+
+  cleanupStaticPeers();
+  activeHostRoomCode = norm;
+  const peer = new Peer(peerIdForRoom(norm), { debug: 0 });
+  activeHostPeer = peer;
+
+  peer.on('connection', (conn) => {
+    activeHostConns.add(conn);
+    conn.on('open', () => {
+      const latest = getLocalRoom(norm);
+      if (latest) conn.send({ type: 'ROOM_UPDATE', room: latest });
+    });
+
+    conn.on('data', (raw: any) => {
+      try {
+        const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const current = getLocalRoom(norm);
+        if (!current) {
+          conn.send({ type: 'ACTION_ERROR', reqId: msg.reqId, error: 'Room closed' });
+          return;
+        }
+        const res = applyRoomMutationLocal(current, msg);
+        if (res.error) {
+          conn.send({ type: 'ACTION_ERROR', reqId: msg.reqId, error: res.error });
+          return;
+        }
+        if (res.closed || !res.room) {
+          deleteLocalRoom(norm);
+          activeHostConns.forEach(c => c.open && c.send({ type: 'ROOM_CLOSED', code: norm }));
+          cleanupStaticPeers();
+          return;
+        }
+        saveLocalRoom(res.room);
+        broadcastToPeerClients(res.room);
+        peerUpdateListeners.forEach(cb => cb(res.room!));
+        conn.send({
+          type: 'ACTION_OK',
+          reqId: msg.reqId,
+          room: res.room,
+          currentMemberId: res.memberId,
+        });
+      } catch {
+        // ignore
+      }
+    });
+
+    conn.on('close', () => {
+      activeHostConns.delete(conn);
+    });
+  });
+}
+
+function cleanupStaticPeers() {
+  activeHostConns.forEach(c => { try { c.close(); } catch {} });
+  activeHostConns.clear();
+  if (activeHostPeer) { try { activeHostPeer.destroy(); } catch {} activeHostPeer = null; }
+  activeHostRoomCode = null;
+  if (activeClientConn) { try { activeClientConn.close(); } catch {} activeClientConn = null; }
+  if (activeClientPeer) { try { activeClientPeer.destroy(); } catch {} activeClientPeer = null; }
+  activeClientRoomCode = null;
+}
+
+async function sendPeerActionToHost(code: string, payload: any): Promise<{ room: MultiplayerRoom; currentMemberId?: string }> {
+  const norm = normalizeRoomCode(code);
+  const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  const ensureClientConn = async (): Promise<DataConnection> => {
+    if (activeClientConn && activeClientConn.open && activeClientRoomCode === norm) {
+      return activeClientConn;
+    }
+    cleanupStaticPeers();
+    activeClientRoomCode = norm;
+    return new Promise((resolve, reject) => {
+      const peer = new Peer({ debug: 0 });
+      activeClientPeer = peer;
+      const timer = setTimeout(() => {
+        reject(new Error(`Room "${norm}" not found or host is offline.`));
+      }, 7000);
+
+      peer.on('open', () => {
+        const conn = peer.connect(peerIdForRoom(norm), { reliable: true });
+        activeClientConn = conn;
+        conn.on('open', () => {
+          clearTimeout(timer);
+          resolve(conn);
+        });
+        conn.on('data', (raw: any) => {
+          try {
+            const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (msg.type === 'ROOM_UPDATE' && msg.room) {
+              saveLocalRoom(msg.room);
+              peerUpdateListeners.forEach(cb => cb(msg.room));
+            } else if (msg.type === 'ROOM_CLOSED') {
+              deleteLocalRoom(norm);
+              peerCloseListeners.forEach(cb => cb(norm));
+            }
+          } catch {}
+        });
+        conn.on('error', () => {
+          clearTimeout(timer);
+          reject(new Error(`Unable to connect to room "${norm}".`));
+        });
+      });
+
+      peer.on('error', (err) => {
+        clearTimeout(timer);
+        reject(new Error(err?.message?.includes('Could not connect') ? `Room "${norm}" not found.` : (err?.message || 'Connection failed')));
+      });
+    });
+  };
+
+  const conn = await ensureClientConn();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Host did not respond in time.')), 6000);
+    const handler = (raw: any) => {
+      try {
+        const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (msg.reqId === reqId) {
+          clearTimeout(timer);
+          conn.off('data', handler);
+          if (msg.type === 'ACTION_ERROR') {
+            reject(new Error(msg.error || 'Action failed'));
+          } else {
+            if (msg.room) saveLocalRoom(msg.room);
+            resolve({ room: msg.room, currentMemberId: msg.currentMemberId });
+          }
+        }
+      } catch {}
+    };
+    conn.on('data', handler);
+    conn.send({ ...payload, reqId });
+  });
+}
+
+// ============================================================================
+// Public Multiplayer API
+// ============================================================================
+export async function createRoomApi(
   hostName: string,
   clubName: string,
   mode: MultiplayerMode,
   customCode?: string
-): { room: MultiplayerRoom; currentMemberId: string } {
-  let code = (customCode && customCode.trim() ? customCode.trim().toUpperCase() : `RCL-${Math.floor(100 + Math.random() * 900)}`).replace(/[^A-Z0-9-]/g, '').slice(0, 10);
+): Promise<{ room: MultiplayerRoom; currentMemberId: string }> {
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
+    const res = await fetch('/api/rooms/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostName, clubName, mode, customCode }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to create room');
+      }
+      saveLocalRoom(data.room);
+      saveLocalSession(data.room.code, data.currentMemberId);
+      return data;
+    }
+  }
+
+  // Static / serverless fallback (Vercel)
+  let code = (customCode && customCode.trim()
+    ? normalizeRoomCode(customCode).replace(/[^A-Z0-9-]/g, '').slice(0, 12)
+    : `RCL-${Math.floor(100 + Math.random() * 900)}`);
   if (!code) code = `RCL-${Math.floor(100 + Math.random() * 900)}`;
 
   const hostId = `usr-${Math.random().toString(36).substring(2, 9)}`;
@@ -140,11 +553,11 @@ function createLocalFallbackRoom(
 
   const hostMember: RoomMember = {
     id: hostId,
-    name: hostName || 'Host Manager',
-    clubName: clubName || 'RCL Dream XI',
+    name: (hostName && hostName.trim()) ? hostName.trim() : 'Host Manager',
+    clubName: (clubName && clubName.trim()) ? clubName.trim() : 'RCL Dream XI',
     avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&h=100&fit=crop&crop=faces',
     isHost: true,
-    ready: true,
+    ready: false,
     formation: '4-3-3',
     tactics: {
       buildup: 'Direct',
@@ -169,10 +582,7 @@ function createLocalFallbackRoom(
     draftPicksCount: 0,
     matchScore: 0,
   };
-
-  FORMATIONS['4-3-3'].slots.forEach(s => {
-    hostMember.startingXI[s.id] = null;
-  });
+  FORMATIONS['4-3-3'].slots.forEach(s => { hostMember.startingXI[s.id] = null; });
 
   const room: MultiplayerRoom = {
     code,
@@ -192,52 +602,9 @@ function createLocalFallbackRoom(
   };
 
   saveLocalRoom(room);
+  saveLocalSession(room.code, hostId);
+  startStaticHostPeer(room.code);
   return { room, currentMemberId: hostId };
-}
-
-export async function createRoomApi(
-  hostName: string,
-  clubName: string,
-  mode: MultiplayerMode,
-  customCode?: string
-): Promise<{ room: MultiplayerRoom; currentMemberId: string }> {
-  try {
-    const res = await fetch('/api/rooms/create', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hostName, clubName, mode, customCode }),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        saveLocalSession(data.room.code, data.currentMemberId);
-        return data;
-      }
-    } else {
-      const err = await res.json().catch(() => null);
-      if (err?.error) throw new Error(err.error);
-    }
-  } catch (err: any) {
-    console.warn('[RCL] Server create room endpoint warning:', err);
-    if (err.message && !err.message.includes('fetch')) {
-      throw err;
-    }
-  }
-
-  // Graceful fallback for offline mode
-  const fallback = createLocalFallbackRoom(hostName, clubName, mode, customCode);
-  saveLocalSession(fallback.room.code, fallback.currentMemberId);
-
-  // Sync to server in background
-  fetch('/api/rooms/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room: fallback.room }),
-  }).catch(() => {});
-
-  return fallback;
 }
 
 export async function joinRoomApi(
@@ -245,26 +612,16 @@ export async function joinRoomApi(
   memberName: string,
   clubName: string
 ): Promise<{ room: MultiplayerRoom; currentMemberId: string }> {
-  let roomCode = (code || '').trim().toUpperCase();
-  // If user pasted a URL or parameter e.g. "?room=RCL-834", extract code
-  if (roomCode.includes('ROOM=')) {
-    const match = roomCode.match(/ROOM=([A-Z0-9-]+)/i);
-    if (match && match[1]) {
-      roomCode = match[1].trim().toUpperCase();
-    }
-  }
-  roomCode = roomCode.replace(/^[#?]/, '').trim();
-
-  // Auto-prefix RCL- if user only entered digits e.g. "382"
-  if (/^\d{3,4}$/.test(roomCode)) {
-    roomCode = `RCL-${roomCode}`;
+  const roomCode = normalizeRoomCode(code);
+  if (!roomCode) {
+    throw new Error('Please enter a valid room code.');
   }
 
   const session = getLocalSession();
   const existingMemberId = session.memberId && session.roomCode === roomCode ? session.memberId : undefined;
 
-  // 1. Authoritative Server Request
-  try {
+  const hasBackend = await isBackendAvailable();
+  if (hasBackend) {
     const res = await fetch('/api/rooms/join', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -275,128 +632,108 @@ export async function joinRoomApi(
         memberId: existingMemberId,
       }),
     });
-
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
       const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        saveLocalSession(data.room.code, data.currentMemberId);
-        return data;
+      if (!res.ok) {
+        throw new Error(data?.error || `Room "${roomCode}" not found.`);
       }
-    } else {
-      console.warn('[RCL] Server join room returned non-ok status');
+      saveLocalRoom(data.room);
+      saveLocalSession(data.room.code, data.currentMemberId);
+      return data;
     }
-  } catch (err: any) {
-    console.warn('[RCL] Server join room endpoint warning:', err);
   }
 
-  // 2. Global Cloud Relay & Local Storage Check (works across devices on Vercel)
-  let targetRoom = await fetchCloudRoom(roomCode);
-  if (!targetRoom) {
-    targetRoom = getLocalRoom(roomCode);
+  // Static fallback: check same-browser localStorage first, then PeerJS cross-device
+  const localRoom = getLocalRoom(roomCode);
+  if (localRoom) {
+    const res = applyRoomMutationLocal(localRoom, {
+      type: 'JOIN',
+      memberName,
+      clubName,
+      memberId: existingMemberId,
+    });
+    if (res.error) throw new Error(res.error);
+    saveLocalRoom(res.room!);
+    saveLocalSession(res.room!.code, res.memberId!);
+    return { room: res.room!, currentMemberId: res.memberId! };
   }
 
-  if (!targetRoom) {
-    throw new Error(`Room "${roomCode}" not found. Verify the code with the host.`);
-  }
-
-  const cleanName = (memberName && memberName.trim()) ? memberName.trim() : 'Challenger';
-  const existing = targetRoom.members.find(m => m.id === existingMemberId || m.name.toLowerCase() === cleanName.toLowerCase());
-  if (existing) {
-    existing.ready = true;
-    targetRoom.updatedAt = Date.now();
-    saveLocalRoom(targetRoom);
-    saveLocalSession(targetRoom.code, existing.id);
-    return { room: targetRoom, currentMemberId: existing.id };
-  }
-
-  const maxCapacity = targetRoom.mode === '1v1' ? 2 : targetRoom.mode === 'TOURNAMENT_4' ? 4 : 8;
-  if (targetRoom.members.length >= maxCapacity) {
-    if (targetRoom.mode === '1v1' && targetRoom.members.length === 2) {
-      const challenger = targetRoom.members[1];
-      challenger.ready = true;
-      targetRoom.updatedAt = Date.now();
-      saveLocalRoom(targetRoom);
-      saveLocalSession(targetRoom.code, challenger.id);
-      return { room: targetRoom, currentMemberId: challenger.id };
-    }
-    throw new Error('This room is already at full capacity.');
-  }
-
-  const memberId = `usr-${Math.random().toString(36).substring(2, 9)}`;
-  const newMember: RoomMember = {
-    id: memberId,
-    name: targetRoom.members.some(m => m.name.toLowerCase() === cleanName.toLowerCase()) ? `${cleanName} (2)` : cleanName,
-    clubName: clubName || 'Challenger XI',
-    avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=faces',
-    isHost: false,
-    ready: true,
-    formation: '4-3-3',
-    tactics: {
-      buildup: 'Direct',
-      mentality: 'Balanced',
-      defensiveLine: 'Medium',
-      pressing: 'Medium',
-      passing: 'Mixed',
-      width: 'Balanced',
-    },
-    startingXI: {},
-    analytics: {
-      overallRating: 0,
-      scoringRating: 0,
-      stoppingRating: 0,
-      teamworkRating: 0,
-      formationCompatibility: 80,
-      cardScore: 0,
-      positionCoverage: 0,
-      squadDepth: 0,
-    },
-    rerollsLeft: 3,
-    draftPicksCount: 0,
-    matchScore: 0,
-  };
-
-  FORMATIONS['4-3-3'].slots.forEach(s => {
-    newMember.startingXI[s.id] = null;
+  const remote = await sendPeerActionToHost(roomCode, {
+    type: 'JOIN',
+    memberName,
+    clubName,
+    memberId: existingMemberId,
   });
+  saveLocalSession(remote.room.code, remote.currentMemberId!);
+  return { room: remote.room, currentMemberId: remote.currentMemberId! };
+}
 
-  targetRoom.members.push(newMember);
-  targetRoom.updatedAt = Date.now();
-  saveLocalRoom(targetRoom);
-  saveLocalSession(targetRoom.code, memberId);
+export async function leaveRoomApi(code: string, memberId?: string | null): Promise<void> {
+  const roomCode = normalizeRoomCode(code);
+  clearLocalSession();
 
-  // Sync to server in background if available
-  fetch('/api/rooms/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room: targetRoom }),
-  }).catch(() => {});
+  const hasBackend = await isBackendAvailable();
+  if (hasBackend) {
+    try {
+      await fetch('/api/rooms/leave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: roomCode, memberId }),
+      });
+    } catch {
+      // ignore network error on leave
+    }
+    deleteLocalRoom(roomCode);
+    cleanupStaticPeers();
+    return;
+  }
 
-  return { room: targetRoom, currentMemberId: memberId };
+  const localRoom = getLocalRoom(roomCode);
+  if (localRoom && activeHostRoomCode === roomCode) {
+    const res = applyRoomMutationLocal(localRoom, { type: 'LEAVE', memberId });
+    if (res.closed || !res.room) {
+      deleteLocalRoom(roomCode);
+      activeHostConns.forEach(c => c.open && c.send({ type: 'ROOM_CLOSED', code: roomCode }));
+    } else {
+      saveLocalRoom(res.room);
+      broadcastToPeerClients(res.room);
+    }
+  } else if (activeClientConn && activeClientConn.open) {
+    try {
+      await sendPeerActionToHost(roomCode, { type: 'LEAVE', memberId });
+    } catch {
+      // ignore
+    }
+  } else if (localRoom) {
+    const res = applyRoomMutationLocal(localRoom, { type: 'LEAVE', memberId });
+    if (res.closed || !res.room) deleteLocalRoom(roomCode);
+    else saveLocalRoom(res.room);
+  }
+
+  cleanupStaticPeers();
 }
 
 export async function addBotApi(code: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
 
-  try {
+  if (hasBackend) {
     const res = await fetch('/api/rooms/add-bot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback to local
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to add challenger');
+    saveLocalRoom(data.room);
+    return data.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
+  const maxCapacity = local.mode === '1v1' ? 2 : local.mode === 'TOURNAMENT_4' ? 4 : 8;
+  if (local.members.length >= maxCapacity) throw new Error('Room is already full');
 
   const BOT_MANAGERS = [
     { name: 'Pep Guardiola', club: 'Barça 2011' },
@@ -406,126 +743,79 @@ export async function addBotApi(code: string): Promise<MultiplayerRoom> {
     { name: 'Claudio Ranieri', club: 'Leicester 2016' },
   ];
   const botInfo = BOT_MANAGERS[Math.floor(Math.random() * BOT_MANAGERS.length)];
-  const botId = `bot-${Math.random().toString(36).substring(2, 9)}`;
-
   const botMember: RoomMember = {
-    id: botId,
+    id: `bot-${Math.random().toString(36).substring(2, 9)}`,
     name: `${botInfo.name} (AI)`,
     clubName: botInfo.club,
     avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop&crop=faces',
     isHost: false,
     ready: true,
     formation: '4-3-3',
-    tactics: {
-      buildup: 'Direct',
-      mentality: 'Attacking',
-      defensiveLine: 'High',
-      pressing: 'High',
-      passing: 'Mixed',
-      width: 'Wide',
-    },
+    tactics: { buildup: 'Direct', mentality: 'Attacking', defensiveLine: 'High', pressing: 'High', passing: 'Mixed', width: 'Wide' },
     startingXI: {},
-    analytics: {
-      overallRating: 84,
-      scoringRating: 82,
-      stoppingRating: 80,
-      teamworkRating: 85,
-      formationCompatibility: 85,
-      cardScore: 84,
-      positionCoverage: 80,
-      squadDepth: 75,
-    },
+    analytics: { overallRating: 84, scoringRating: 82, stoppingRating: 80, teamworkRating: 85, formationCompatibility: 85, cardScore: 84, positionCoverage: 80, squadDepth: 75 },
     rerollsLeft: 3,
     draftPicksCount: 0,
     matchScore: 0,
     isBot: true,
   };
-
-  FORMATIONS['4-3-3'].slots.forEach(s => {
-    botMember.startingXI[s.id] = null;
-  });
-
+  FORMATIONS['4-3-3'].slots.forEach(s => { botMember.startingXI[s.id] = null; });
   local.members.push(botMember);
   local.updatedAt = Date.now();
+  maybeAutoStartDraftLocal(local);
   saveLocalRoom(local);
-
-  fetch('/api/rooms/sync', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room: local }),
-  }).catch(() => {});
-
+  broadcastToPeerClients(local);
   return local;
 }
 
 export async function getRoomApi(code: string): Promise<MultiplayerRoom> {
-  let roomCode = (code || '').trim().toUpperCase();
-  if (roomCode.includes('ROOM=')) {
-    const match = roomCode.match(/ROOM=([A-Z0-9-]+)/i);
-    if (match && match[1]) roomCode = match[1].trim().toUpperCase();
-  }
-  roomCode = roomCode.replace(/^[#?]/, '').trim();
-  if (/^\d{3,4}$/.test(roomCode)) roomCode = `RCL-${roomCode}`;
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
 
-  try {
+  if (hasBackend) {
     const res = await fetch(`/api/rooms/${encodeURIComponent(roomCode)}?_t=${Date.now()}`, {
       cache: 'no-store',
       headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' },
     });
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
       const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
+      if (!res.ok) {
+        throw new Error(data?.error || `Room "${roomCode}" not found.`);
       }
+      saveLocalRoom(data.room, false);
+      return data.room;
     }
-  } catch {
-    // fallback
   }
 
-  // 2. Global Cloud Relay (cross-device across Vercel / phones / PCs)
-  const cloud = await fetchCloudRoom(roomCode);
-  if (cloud) {
-    saveLocalRoom(cloud);
-    return cloud;
-  }
-
-  // 3. Local browser storage
   const local = getLocalRoom(roomCode);
   if (local) return local;
   throw new Error(`Room "${roomCode}" not found. Verify the code with the host.`);
 }
 
-
 export async function startDraftApi(code: string, memberId: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/start-draft', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to start draft');
+    saveLocalRoom(data.room);
+    return data.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
-  local.status = 'DRAFT';
-  local.currentTurnMemberId = local.members[0].id;
-  local.turnIndex = 0;
-  local.claimedPlayerIds = [];
-  local.activeSquadId = getRandomClub().id;
-  local.updatedAt = Date.now();
-  saveLocalRoom(local);
-  return local;
+  const res = applyRoomMutationLocal(local, { type: 'START_DRAFT', memberId });
+  if (res.error) throw new Error(res.error);
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
+  return res.room!;
 }
 
 export async function draftPickApi(
@@ -534,117 +824,85 @@ export async function draftPickApi(
   playerId: string,
   slotId: string
 ): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/draft-pick', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId, playerId, slotId }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Draft pick failed');
+    saveLocalRoom(data.room);
+    return data.room;
+  }
+
+  if (activeClientConn && activeClientConn.open && activeClientRoomCode === roomCode) {
+    const remote = await sendPeerActionToHost(roomCode, { type: 'DRAFT_PICK', memberId, playerId, slotId });
+    return remote.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
+  const res = applyRoomMutationLocal(local, { type: 'DRAFT_PICK', memberId, playerId, slotId });
+  if (res.error) throw new Error(res.error);
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
 
-  if (local.claimedPlayerIds.includes(playerId)) {
-    throw new Error('Player already claimed');
-  }
-
-  const member = local.members.find(m => m.id === memberId);
-  if (!member) throw new Error('Member not found');
-
-  const club = ALL_CLUBS.find(c => c.id === local.activeSquadId) || ALL_CLUBS[0];
-  const player = club.roster.find(p => p.id === playerId) || ALL_CLUBS.flatMap(c => c.roster).find(p => p.id === playerId);
-  if (!player) throw new Error('Player not found');
-
-  member.startingXI[slotId] = player;
-  member.draftPicksCount = Object.values(member.startingXI).filter(Boolean).length;
-  local.claimedPlayerIds.push(player.id);
-
-  const players = Object.values(member.startingXI).filter((p): p is Player => p !== null);
-  member.analytics.overallRating = players.length > 0 ? Math.round(players.reduce((a, b) => a + b.overall, 0) / players.length) : 60;
-
-  const currentIdx = local.members.findIndex(m => m.id === memberId);
-  const nextIdx = (currentIdx + 1) % local.members.length;
-  local.currentTurnMemberId = local.members[nextIdx].id;
-  local.turnIndex += 1;
-  local.activeSquadId = getRandomClub([local.activeSquadId]).id;
-
-  const allFull = local.members.every(m => Object.values(m.startingXI).filter(Boolean).length >= 11);
-  if (allFull) {
-    local.status = 'READY_BATTLE';
-  }
-
-  local.updatedAt = Date.now();
-  saveLocalRoom(local);
-
-  // If next is bot, auto-play bot turn
-  const nextMem = local.members[nextIdx];
-  if (nextMem && nextMem.isBot && local.status === 'DRAFT') {
+  const nextMem = res.room!.members.find(m => m.id === res.room!.currentTurnMemberId);
+  if (nextMem && nextMem.isBot && res.room!.status === 'DRAFT') {
     setTimeout(() => {
-      const currentSquad = ALL_CLUBS.find(c => c.id === local.activeSquadId) || ALL_CLUBS[0];
-      const emptySlot = Object.entries(nextMem.startingXI).find(([, p]) => p === null);
-      if (emptySlot) {
-        const candidate = currentSquad.roster.find(p => !local.claimedPlayerIds.includes(p.id));
-        if (candidate) {
-          nextMem.startingXI[emptySlot[0]] = candidate;
-          local.claimedPlayerIds.push(candidate.id);
-          const nextPls = Object.values(nextMem.startingXI).filter((p): p is Player => p !== null);
-          nextMem.analytics.overallRating = Math.round(nextPls.reduce((a, b) => a + b.overall, 0) / nextPls.length);
-          local.currentTurnMemberId = local.members[currentIdx].id;
-          local.turnIndex += 1;
-          local.activeSquadId = getRandomClub([local.activeSquadId]).id;
-          if (local.members.every(m => Object.values(m.startingXI).filter(Boolean).length >= 11)) {
-            local.status = 'READY_BATTLE';
-          }
-          local.updatedAt = Date.now();
-          saveLocalRoom(local);
+      const latest = getLocalRoom(roomCode);
+      if (!latest || latest.status !== 'DRAFT') return;
+      const bot = latest.members.find(m => m.id === latest.currentTurnMemberId && m.isBot);
+      if (!bot) return;
+      const currentSquad = ALL_CLUBS.find(c => c.id === latest.activeSquadId) || ALL_CLUBS[0];
+      const emptySlot = Object.entries(bot.startingXI).find(([, p]) => p === null);
+      const candidate = currentSquad.roster.find(p => !latest.claimedPlayerIds.includes(p.id));
+      if (emptySlot && candidate) {
+        const botRes = applyRoomMutationLocal(latest, { type: 'DRAFT_PICK', memberId: bot.id, playerId: candidate.id, slotId: emptySlot[0] });
+        if (botRes.room) {
+          saveLocalRoom(botRes.room);
+          broadcastToPeerClients(botRes.room);
+          peerUpdateListeners.forEach(cb => cb(botRes.room!));
         }
       }
     }, 500);
   }
 
-  return local;
+  return res.room!;
 }
 
 export async function rerollSquadApi(code: string, memberId: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/reroll', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Reroll failed');
+    saveLocalRoom(data.room);
+    return data.room;
+  }
+
+  if (activeClientConn && activeClientConn.open && activeClientRoomCode === roomCode) {
+    const remote = await sendPeerActionToHost(roomCode, { type: 'REROLL', memberId });
+    return remote.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
-  const member = local.members.find(m => m.id === memberId);
-  if (!member || member.rerollsLeft <= 0) throw new Error('No rerolls left');
-
-  member.rerollsLeft -= 1;
-  local.activeSquadId = getRandomClub([local.activeSquadId]).id;
-  local.updatedAt = Date.now();
-  saveLocalRoom(local);
-  return local;
+  const res = applyRoomMutationLocal(local, { type: 'REROLL', memberId });
+  if (res.error) throw new Error(res.error);
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
+  return res.room!;
 }
 
 export async function updateTacticsApi(
@@ -653,140 +911,102 @@ export async function updateTacticsApi(
   formation?: FormationType,
   tactics?: Partial<TeamTactics>
 ): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/update-tactics', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId, formation, tactics }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to update tactics');
+    saveLocalRoom(data.room);
+    return data.room;
+  }
+
+  if (activeClientConn && activeClientConn.open && activeClientRoomCode === roomCode) {
+    const remote = await sendPeerActionToHost(roomCode, { type: 'UPDATE_TACTICS', memberId, formation, tactics });
+    return remote.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
-  const member = local.members.find(m => m.id === memberId);
-  if (member) {
-    if (formation) member.formation = formation;
-    if (tactics) member.tactics = { ...member.tactics, ...tactics };
-    local.updatedAt = Date.now();
-    saveLocalRoom(local);
-  }
-  return local;
+  const res = applyRoomMutationLocal(local, { type: 'UPDATE_TACTICS', memberId, formation, tactics });
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
+  return res.room!;
 }
 
 export async function toggleReadyApi(code: string, memberId: string, ready?: boolean): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/ready', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId, ready }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to toggle ready');
+    saveLocalRoom(data.room);
+    return data.room;
+  }
+
+  if (activeClientConn && activeClientConn.open && activeClientRoomCode === roomCode) {
+    const remote = await sendPeerActionToHost(roomCode, { type: 'TOGGLE_READY', memberId, ready });
+    return remote.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
-  const member = local.members.find(m => m.id === memberId);
-  if (member) {
-    member.ready = ready !== undefined ? ready : !member.ready;
-    local.updatedAt = Date.now();
-    saveLocalRoom(local);
-  }
-  return local;
+  const res = applyRoomMutationLocal(local, { type: 'TOGGLE_READY', memberId, ready });
+  if (res.error) throw new Error(res.error);
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
+  return res.room!;
 }
 
 export async function launchMatchApi(code: string, memberId: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/launch-match', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode, memberId }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to launch match');
+    saveLocalRoom(data.room);
+    return data.room;
   }
 
   const local = getLocalRoom(roomCode);
   if (!local) throw new Error('Room not found');
-  const home = local.members[0];
-  const away = local.members[1] || local.members[0];
-
-  local.status = 'MATCH';
-  local.h2hMatch = {
-    matchId: `m-${Date.now()}`,
-    homeMemberId: home.id,
-    awayMemberId: away.id,
-    minute: 0,
-    homeScore: 0,
-    awayScore: 0,
-    isFinished: false,
-    events: [
-      {
-        id: `ev-0`,
-        minute: 1,
-        type: 'CHANCE',
-        team: 'home',
-        playerName: 'Referee',
-        description: 'Whistle blows! 1v1 battle kicks off.',
-        scoreline: '0 - 0',
-      },
-    ],
-    stats: {
-      possession: [50, 50],
-      shots: [0, 0],
-      shotsOnTarget: [0, 0],
-      tackles: [0, 0],
-    },
-    winnerId: null,
-  };
-  local.updatedAt = Date.now();
-  saveLocalRoom(local);
-  return local;
+  const res = applyRoomMutationLocal(local, { type: 'LAUNCH_MATCH', memberId });
+  saveLocalRoom(res.room!);
+  broadcastToPeerClients(res.room!);
+  return res.room!;
 }
 
 export async function stepMatchApi(code: string): Promise<MultiplayerRoom> {
-  const roomCode = (code || '').trim().toUpperCase();
-  try {
+  const roomCode = normalizeRoomCode(code);
+  const hasBackend = await isBackendAvailable();
+
+  if (hasBackend) {
     const res = await fetch('/api/rooms/step-match', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code: roomCode }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.room) {
-        saveLocalRoom(data.room);
-        return data.room;
-      }
-    }
-  } catch {
-    // fallback
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || 'Failed to advance match');
+    saveLocalRoom(data.room);
+    return data.room;
   }
 
   const local = getLocalRoom(roomCode);
@@ -826,6 +1046,7 @@ export async function stepMatchApi(code: string): Promise<MultiplayerRoom> {
 
   local.updatedAt = Date.now();
   saveLocalRoom(local);
+  broadcastToPeerClients(local);
   return local;
 }
 
@@ -861,10 +1082,9 @@ export async function submitLeaderboardApi(entry: {
   highestScore: number;
   totalGoals: number;
 }): Promise<boolean> {
-  // Always update local leaderboard storage for offline / static host resilience
   try {
     const raw = localStorage.getItem('rcl_leaderboard');
-    let list: LeaderboardEntry[] = raw ? JSON.parse(raw) : [];
+    const list: LeaderboardEntry[] = raw ? JSON.parse(raw) : [];
     const existingIndex = list.findIndex(e => e.managerName.toLowerCase() === entry.managerName.toLowerCase());
     const totalMatches = entry.wins + entry.draws + entry.losses;
     const winRate = totalMatches > 0 ? Math.round((entry.wins / totalMatches) * 100) : 0;
@@ -910,46 +1130,76 @@ export async function submitLeaderboardApi(entry: {
   }
 }
 
-
-// WebSocket Connection Helper with Auto-Reconnect, BroadcastChannel & Polling Fallback
+// Real-Time Room Subscription (WebSocket /ws + Polling Fallback + BroadcastChannel + PeerJS)
 export function subscribeToRoomSocket(
   code: string,
   memberId: string,
-  onUpdate: (room: MultiplayerRoom) => void
+  onUpdate: (room: MultiplayerRoom) => void,
+  onRoomClosed?: () => void
 ): () => void {
-  const roomCode = code.toUpperCase();
+  const roomCode = normalizeRoomCode(code);
   let ws: WebSocket | null = null;
   let isClosed = false;
   let reconnectTimer: any = null;
   let pollInterval: any = null;
+  let lastUpdatedAt = 0;
 
-  // 1. Immediately fetch fresh room state on mount
-  getRoomApi(roomCode).then(r => {
-    if (r && !isClosed) onUpdate(r);
-  }).catch(() => {});
+  const emitUpdate = (room: MultiplayerRoom) => {
+    if (isClosed) return;
+    if (room.updatedAt && room.updatedAt === lastUpdatedAt) return;
+    lastUpdatedAt = room.updatedAt || Date.now();
+    onUpdate(room);
+  };
 
-  // 2. Cross-tab Broadcast Channel listener
+  // Ensure static Host Peer is running if backend is unavailable
+  isBackendAvailable().then(hasBackend => {
+    if (!hasBackend && !isClosed) {
+      const local = getLocalRoom(roomCode);
+      if (local && local.hostId === memberId) {
+        startStaticHostPeer(roomCode);
+      }
+    }
+  });
+
+  // 1. Immediately fetch fresh room state
+  getRoomApi(roomCode).then(emitUpdate).catch(() => {});
+
+  // 2. PeerJS update listeners (static host fallback)
+  const handlePeerUpdate = (room: MultiplayerRoom) => {
+    const incCode = normalizeRoomCode(room.code).replace(/[^A-Z0-9]/g, '');
+    const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
+    if (incCode === curCode) emitUpdate(room);
+  };
+  const handlePeerClose = (closedCode: string) => {
+    const incCode = normalizeRoomCode(closedCode).replace(/[^A-Z0-9]/g, '');
+    const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
+    if (incCode === curCode && !isClosed) onRoomClosed?.();
+  };
+  peerUpdateListeners.add(handlePeerUpdate);
+  peerCloseListeners.add(handlePeerClose);
+
+  // 3. Cross-tab Broadcast Channel listener
   const handleBcMessage = (event: MessageEvent) => {
     if (event.data?.type === 'ROOM_UPDATE' && event.data?.room) {
-      const incCode = event.data.room.code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const incCode = normalizeRoomCode(event.data.room.code).replace(/[^A-Z0-9]/g, '');
       const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
-      if (incCode === curCode) {
-        onUpdate(event.data.room);
-      }
+      if (incCode === curCode) emitUpdate(event.data.room);
+    } else if (event.data?.type === 'ROOM_CLOSED' && event.data?.code) {
+      const incCode = normalizeRoomCode(event.data.code).replace(/[^A-Z0-9]/g, '');
+      const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
+      if (incCode === curCode && !isClosed) onRoomClosed?.();
     }
   };
   mpChannel?.addEventListener('message', handleBcMessage);
 
-  // 3. Storage event listener (across browser tabs)
+  // 4. Storage event listener (across browser tabs)
   const handleStorageEvent = (e: StorageEvent) => {
     if (e.key && e.key.startsWith('rcl_room_') && e.newValue) {
       try {
         const parsed = JSON.parse(e.newValue);
-        const incCode = (parsed.code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        const incCode = normalizeRoomCode(parsed.code || '').replace(/[^A-Z0-9]/g, '');
         const curCode = roomCode.replace(/[^A-Z0-9]/g, '');
-        if (incCode === curCode) {
-          onUpdate(parsed);
-        }
+        if (incCode === curCode) emitUpdate(parsed);
       } catch {
         // ignore
       }
@@ -957,88 +1207,75 @@ export function subscribeToRoomSocket(
   };
   window.addEventListener('storage', handleStorageEvent);
 
-  // 4. Fast Polling every 600ms (reliable real-time sync across devices and proxies)
+  // 5. Polling fallback every 800ms when backend is active
   pollInterval = setInterval(async () => {
     if (isClosed) return;
     try {
+      const hasBackend = await isBackendAvailable();
+      if (!hasBackend) return;
       const room = await getRoomApi(roomCode);
-      if (room && !isClosed) onUpdate(room);
-    } catch {
-      // ignore
+      if (room && !isClosed) emitUpdate(room);
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('not found') && !isClosed) {
+        onRoomClosed?.();
+      }
     }
-  }, 600);
+  }, 800);
 
-  // 5. WebSocket connection using explicit /ws path
+  // 6. WebSocket connection using explicit /ws path
   function connect() {
     if (isClosed) return;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    isBackendAvailable().then(hasBackend => {
+      if (!hasBackend || isClosed) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-    try {
-      ws = new WebSocket(wsUrl);
+      try {
+        ws = new WebSocket(wsUrl);
 
-      ws.onopen = () => {
-        ws?.send(JSON.stringify({ type: 'SUBSCRIBE_ROOM', roomCode, memberId }));
-      };
+        ws.onopen = () => {
+          ws?.send(JSON.stringify({ type: 'SUBSCRIBE_ROOM', roomCode, memberId }));
+        };
 
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === 'ROOM_UPDATE' && payload.room) {
-            saveLocalRoom(payload.room);
-            onUpdate(payload.room);
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === 'ROOM_UPDATE' && payload.room) {
+              saveLocalRoom(payload.room, false);
+              emitUpdate(payload.room);
+            } else if (payload.type === 'ROOM_CLOSED' && !isClosed) {
+              onRoomClosed?.();
+            }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
-      };
+        };
 
-      ws.onclose = () => {
+        ws.onclose = () => {
+          if (!isClosed) {
+            reconnectTimer = setTimeout(connect, 2000);
+          }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+      } catch {
         if (!isClosed) {
           reconnectTimer = setTimeout(connect, 2000);
         }
-      };
-
-      ws.onerror = () => {
-        ws?.close();
-      };
-    } catch {
-      if (!isClosed) {
-        reconnectTimer = setTimeout(connect, 2000);
       }
-    }
-  }
-
-  // 6. Global Cloud Relay EventSource (instant cross-device sync across Vercel and all hosts)
-  let eventSource: EventSource | null = null;
-  const cleanCode = roomCode.replace(/[^A-Z0-9]/g, '');
-  if (typeof window !== 'undefined' && 'EventSource' in window) {
-    try {
-      eventSource = new EventSource(`https://ntfy.sh/rcl-room-${cleanCode}/sse`);
-      eventSource.onmessage = (event) => {
-        if (isClosed) return;
-        try {
-          const item = JSON.parse(event.data);
-          if (item.event === 'message' && item.message) {
-            const cloudRoom = typeof item.message === 'string' ? JSON.parse(item.message) : item.message;
-            if (cloudRoom && cloudRoom.code && Array.isArray(cloudRoom.members)) {
-              saveLocalRoom(cloudRoom);
-              onUpdate(cloudRoom);
-            }
-          }
-        } catch {}
-      };
-    } catch {}
+    });
   }
 
   connect();
-
 
   return () => {
     isClosed = true;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (pollInterval) clearInterval(pollInterval);
-    if (eventSource) eventSource.close();
+    peerUpdateListeners.delete(handlePeerUpdate);
+    peerCloseListeners.delete(handlePeerClose);
     mpChannel?.removeEventListener('message', handleBcMessage);
     window.removeEventListener('storage', handleStorageEvent);
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1046,4 +1283,3 @@ export function subscribeToRoomSocket(
     }
   };
 }
-
